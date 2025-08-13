@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Media Flow Test</title>
+</head>
+<body>
+    <h1>Media Flow Test</h1>
+    <button onclick="startTest()">Start Media Test</button>
+    <div id="status"></div>
+    <audio id="remoteAudio" autoplay></audio>
+
+    <script>
+        let pc1, pc2;
+        const status = document.getElementById('status');
+
+        async function startTest() {
+            status.innerHTML = 'Starting test...<br>';
+            
+            // Create two peer connections
+            pc1 = new RTCPeerConnection();
+            pc2 = new RTCPeerConnection();
+            
+            // Set up ICE candidate exchange
+            pc1.onicecandidate = (event) => {
+                if (event.candidate) {
+                    pc2.addIceCandidate(event.candidate);
+                }
+            };
+            
+            pc2.onicecandidate = (event) => {
+                if (event.candidate) {
+                    pc1.addIceCandidate(event.candidate);
+                }
+            };
+            
+            // Handle incoming tracks on pc2
+            pc2.ontrack = (event) => {
+                status.innerHTML += 'Track received on PC2!<br>';
+                document.getElementById('remoteAudio').srcObject = event.streams[0];
+                
+                // Monitor audio levels
+                const audioContext = new AudioContext();
+                const source = audioContext.createMediaStreamSource(event.streams[0]);
+                const analyser = audioContext.createAnalyser();
+                source.connect(analyser);
+                
+                const dataArray = new Uint8Array(analyser.frequencyBinCount);
+                
+                const checkAudioLevel = () => {
+                    analyser.getByteFrequencyData(dataArray);
+                    const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
+                    status.innerHTML += `Audio level: ${average.toFixed(2)}<br>`;
+                    
+                    if (average > 0) {
+                        status.innerHTML += '✅ Audio data is flowing!<br>';
+                    }
+                };
+                
+                setInterval(checkAudioLevel, 1000);
+            };
+            
+            try {
+                // Get user media
+                status.innerHTML += 'Getting microphone access...<br>';
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                status.innerHTML += 'Microphone access granted!<br>';
+                
+                // Add tracks to pc1
+                stream.getTracks().forEach(track => {
+                    pc1.addTrack(track, stream);
+                    status.innerHTML += `Added ${track.kind} track to PC1<br>`;
+                });
+                
+                // Create offer
+                const offer = await pc1.createOffer();
+                await pc1.setLocalDescription(offer);
+                status.innerHTML += `PC1 offer created (${offer.sdp.includes('sendrecv') ? 'sendrecv' : 'recvonly'})<br>`;
+                
+                // Set remote description on pc2
+                await pc2.setRemoteDescription(offer);
+                
+                // Create answer
+                const answer = await pc2.createAnswer();
+                await pc2.setLocalDescription(answer);
+                status.innerHTML += `PC2 answer created<br>`;
+                
+                // Set remote description on pc1
+                await pc1.setRemoteDescription(answer);
+                
+                status.innerHTML += 'WebRTC connection established!<br>';
+                
+            } catch (error) {
+                status.innerHTML += `Error: ${error.message}<br>`;
+            }
+        }
+    </script>
+</body>
+</html> 
