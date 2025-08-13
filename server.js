@@ -163,8 +163,27 @@ app.post("/webhook", async (req, res) => {
 async function initiateWebRTCBridge() {
     if (!browserOfferSdp || !whatsappOfferSdp || !browserSocket) return;
 
+    // ✅ Replace with your actual Metered.ca TURN credentials
+    const ICE_SERVERS = [
+      {
+        urls: [
+          "turn:global.relay.metered.ca:80",
+          "turn:global.relay.metered.ca:443",
+          "turn:global.relay.metered.ca:3478",
+          "turn:global.relay.metered.ca:80?transport=tcp",
+          "turn:global.relay.metered.ca:443?transport=tcp",
+          "turns:global.relay.metered.ca:443?transport=tcp"
+        ],
+        username: "37e1df1e0831b85f190394fc",
+        credential: "ifbScPfPyTAJhEJJ"
+      }
+    ];
+
     // --- Setup browser peer connection ---
-    browserPc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    browserPc = new RTCPeerConnection({
+        iceServers: ICE_SERVERS,
+        iceTransportPolicy: 'relay' // 🚀 Force TURN usage
+    });
     browserStream = new MediaStream();
 
     browserPc.ontrack = (event) => {
@@ -174,7 +193,10 @@ async function initiateWebRTCBridge() {
 
     browserPc.onicecandidate = (event) => {
         if (event.candidate) {
+            console.log("Browser ICE candidate:", event.candidate);
             browserSocket.emit("browser-candidate", event.candidate);
+        } else {
+            console.log("Browser ICE candidate gathering complete.");
         }
     };
 
@@ -185,7 +207,10 @@ async function initiateWebRTCBridge() {
     console.log("Browser offer SDP set as remote description.");
 
     // --- Setup WhatsApp peer connection ---
-    whatsappPc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    whatsappPc = new RTCPeerConnection({
+        iceServers: ICE_SERVERS,
+        iceTransportPolicy: 'relay' // 🚀 Force TURN usage
+    });
 
     const waTrackPromise = new Promise((resolve, reject) => {
         const timeout = setTimeout(() => reject("Timed out waiting for WhatsApp track"), 10000);
@@ -196,6 +221,16 @@ async function initiateWebRTCBridge() {
             resolve();
         };
     });
+
+    whatsappPc.onicecandidate = (event) => {
+        if (event.candidate) {
+            console.log("WhatsApp ICE candidate:", event.candidate);
+            browserSocket.emit("whatsapp-candidate", event.candidate);
+        } else {
+            console.log("WhatsApp ICE candidate gathering complete.");
+        }
+    };
+
 
     await whatsappPc.setRemoteDescription(new RTCSessionDescription({
         type: "offer",
