@@ -1,0 +1,26 @@
+{
+  "name": "whatsapp-calling",
+  "version": "1.0.0",
+  "description": "Real-time WhatsApp voice calling integration using the WhatsApp Business API and WebRTC. Enables two-way audio between browser clients and WhatsApp users.",
+  "main": "server.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/arslan1317/whatsapp-calling.git"
+  },
+  "author": "Mirza Ali",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/arslan1317/whatsapp-calling/issues"
+  },
+  "homepage": "https://github.com/arslan1317/whatsapp-calling#readme",
+  "dependencies": {
+    "axios": "^1.11.0",
+    "dotenv": "^17.2.1",
+    "express": "^5.1.0",
+    "socket.io": "^4.8.1",
+    "wrtc": "^0.4.7"
+  }
+}
