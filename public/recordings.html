@@ -1,0 +1,910 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Call Recordings - WhatsApp Voice Call</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            color: #333;
+        }
+
+        .app-container {
+            max-width: 420px;
+            margin: 0 auto;
+            background: #fff;
+            min-height: 100vh;
+            box-shadow: 0 0 30px rgba(0,0,0,0.3);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #25D366 0%, #128C7E 100%);
+            color: white;
+            padding: 20px;
+            text-align: center;
+            position: relative;
+        }
+
+        .header h1 {
+            font-size: 24px;
+            font-weight: 600;
+            margin-bottom: 5px;
+        }
+
+        .header .subtitle {
+            font-size: 14px;
+            opacity: 0.9;
+        }
+
+        .nav-links {
+            margin: 10px 0;
+        }
+
+        .nav-link {
+            display: inline-block;
+            color: white;
+            text-decoration: none;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 14px;
+            font-weight: 500;
+            background: rgba(255, 255, 255, 0.2);
+            transition: all 0.3s ease;
+            border: 1px solid rgba(255, 255, 255, 0.3);
+        }
+
+        .nav-link:hover {
+            background: rgba(255, 255, 255, 0.3);
+            transform: translateY(-1px);
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+        }
+
+        .nav-link i {
+            margin-right: 6px;
+        }
+
+        .main-content {
+            padding: 20px;
+            padding-bottom: 100px;
+        }
+
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .search-box {
+            flex: 1;
+            position: relative;
+        }
+
+        .search-box input {
+            width: 100%;
+            padding: 12px 20px 12px 45px;
+            border: 2px solid #e9ecef;
+            border-radius: 25px;
+            font-size: 16px;
+            transition: border-color 0.3s ease;
+            background: #f8f9fa;
+        }
+
+        .search-box input:focus {
+            outline: none;
+            border-color: #25D366;
+            background: white;
+        }
+
+        .search-box::before {
+            content: "🔍";
+            position: absolute;
+            left: 15px;
+            top: 50%;
+            transform: translateY(-50%);
+            font-size: 18px;
+        }
+
+        .refresh-btn {
+            background: #25D366;
+            color: white;
+            border: none;
+            padding: 12px 16px;
+            border-radius: 25px;
+            cursor: pointer;
+            font-size: 16px;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 50px;
+        }
+
+        .refresh-btn:hover {
+            background: #128C7E;
+            transform: translateY(-2px);
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .stat-card {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 10px;
+            text-align: center;
+            border-left: 4px solid #25D366;
+        }
+
+        .stat-card h3 {
+            font-size: 1.5em;
+            color: #25D366;
+            margin-bottom: 5px;
+        }
+
+        .stat-card p {
+            color: #6c757d;
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        .recordings-list {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        .recording-card {
+            background: white;
+            border-radius: 15px;
+            padding: 20px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.08);
+            border: 1px solid #e9ecef;
+            transition: all 0.3s ease;
+        }
+
+        .recording-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(0,0,0,0.15);
+        }
+
+        .recording-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 15px;
+        }
+
+        .call-info h3 {
+            font-size: 16px;
+            color: #333;
+            margin-bottom: 5px;
+            font-weight: 600;
+        }
+
+        .call-id {
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            color: #6c757d;
+            background: #f8f9fa;
+            padding: 4px 8px;
+            border-radius: 8px;
+            word-break: break-all;
+        }
+
+        .datetime {
+            color: #25D366;
+            font-size: 14px;
+            font-weight: 500;
+        }
+
+        .recording-actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+        }
+
+        .format-options {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+
+        .format-btn {
+            flex: 1;
+            padding: 12px;
+            border: 2px solid #e9ecef;
+            border-radius: 10px;
+            background: white;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-align: center;
+            font-weight: 500;
+        }
+
+        .format-btn.active {
+            border-color: #25D366;
+            background: #25D366;
+            color: white;
+        }
+
+        .format-btn:hover {
+            border-color: #25D366;
+            background: #f8f9fa;
+        }
+
+        .format-btn.active:hover {
+            background: #128C7E;
+        }
+
+        .action-btn {
+            flex: 1;
+            padding: 12px 16px;
+            border: none;
+            border-radius: 25px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+
+        .btn-play {
+            background: #28a745;
+            color: white;
+        }
+
+        .btn-play:hover {
+            background: #218838;
+            transform: translateY(-1px);
+        }
+
+        .btn-download {
+            background: #007bff;
+            color: white;
+        }
+
+        .btn-download:hover {
+            background: #0056b3;
+            transform: translateY(-1px);
+        }
+
+        .file-list {
+            margin-top: 15px;
+        }
+
+        .file-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            margin-bottom: 8px;
+            border: 1px solid #e9ecef;
+        }
+
+        .file-item:last-child {
+            margin-bottom: 0;
+        }
+
+        .file-details {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .file-name {
+            font-size: 14px;
+            color: #333;
+            font-weight: 500;
+            margin-bottom: 4px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .file-name i {
+            color: #25D366;
+        }
+
+        .file-size {
+            font-size: 12px;
+            color: #666;
+        }
+
+        .file-actions {
+            display: flex;
+            gap: 8px;
+            margin-left: 12px;
+        }
+
+        .action-icon {
+            width: 36px;
+            height: 36px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s ease;
+            font-size: 14px;
+            text-decoration: none;
+        }
+
+        .play-icon {
+            background: #25D366;
+            color: white;
+        }
+
+        .play-icon:hover {
+            background: #1ea952;
+            transform: scale(1.05);
+        }
+
+        .download-icon {
+            background: #007bff;
+            color: white;
+        }
+
+        .download-icon:hover {
+            background: #0056b3;
+            transform: scale(1.05);
+        }
+
+        .manual-play-btn {
+            background: #25D366;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            padding: 8px 12px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.2s ease;
+        }
+
+        .manual-play-btn:hover {
+            background: #1ea952;
+            transform: scale(1.05);
+        }
+
+        .close-player {
+            background: #dc3545;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            padding: 8px 12px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: bold;
+            transition: all 0.2s ease;
+        }
+
+        .close-player:hover {
+            background: #c82333;
+            transform: scale(1.05);
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px 20px;
+            color: #6c757d;
+        }
+
+        .loading::after {
+            content: "";
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #25D366;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-left: 10px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .no-recordings {
+            text-align: center;
+            padding: 60px 20px;
+            color: #6c757d;
+        }
+
+        .no-recordings h3 {
+            font-size: 18px;
+            margin-bottom: 10px;
+            color: #495057;
+        }
+
+        .no-recordings p {
+            font-size: 14px;
+        }
+
+        .error {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 15px;
+            border-radius: 10px;
+            margin: 20px 0;
+            border: 1px solid #f5c6cb;
+            font-size: 14px;
+        }
+
+
+
+        .file-size {
+            color: #6c757d;
+            font-size: 12px;
+            margin-top: 5px;
+        }
+
+        @media (max-width: 480px) {
+            .app-container {
+                margin: 0;
+                border-radius: 0;
+            }
+
+            .main-content {
+                padding: 15px;
+            }
+
+            .stats {
+                grid-template-columns: 1fr;
+                gap: 10px;
+            }
+
+            .recording-actions {
+                flex-direction: column;
+            }
+
+            .format-options {
+                flex-direction: column;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="app-container">
+        <div class="header">
+            <h1><i class="fas fa-microphone"></i> Call Recordings</h1>
+            <div class="subtitle">Your WhatsApp call recordings</div>
+            <div class="nav-links">
+                <a href="index.html" class="nav-link">
+                    <i class="fas fa-home"></i> Home
+                </a>
+            </div>
+        </div>
+
+        <div class="main-content">
+            <div class="controls">
+                <div class="search-box">
+                    <input type="text" id="searchInput" placeholder="Search by call ID or date...">
+                </div>
+                <button class="refresh-btn" onclick="loadRecordings()">
+                    <i class="fas fa-sync-alt"></i>
+                </button>
+            </div>
+
+            <div class="stats" id="statsContainer">
+                <div class="stat-card">
+                    <h3 id="totalRecordings">-</h3>
+                    <p>Total Calls</p>
+                </div>
+                <div class="stat-card">
+                    <h3 id="totalSize">-</h3>
+                    <p>Total Size</p>
+                </div>
+                <div class="stat-card">
+                    <h3 id="latestRecording">-</h3>
+                    <p>Latest Call</p>
+                </div>
+            </div>
+
+            <div id="loadingIndicator" class="loading">
+                Loading recordings...
+            </div>
+            <div id="errorContainer" style="display: none;"></div>
+            <div id="noRecordingsContainer" class="no-recordings" style="display: none;">
+                <h3>No recordings found</h3>
+                <p>Start making calls to see recordings here</p>
+            </div>
+            <div class="recordings-list" id="recordingsList" style="display: none;">
+            </div>
+        </div>
+    </div>
+
+
+
+    <script>
+        let allRecordings = [];
+        let filteredRecordings = [];
+
+        // Load recordings on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            loadRecordings();
+            setupSearch();
+        });
+
+        // Setup search functionality
+        function setupSearch() {
+            const searchInput = document.getElementById('searchInput');
+            searchInput.addEventListener('input', function() {
+                filterRecordings(this.value);
+            });
+        }
+
+        // Load recordings from API
+        async function loadRecordings() {
+            const loadingIndicator = document.getElementById('loadingIndicator');
+            const errorContainer = document.getElementById('errorContainer');
+            const noRecordingsContainer = document.getElementById('noRecordingsContainer');
+            const recordingsList = document.getElementById('recordingsList');
+
+            // Show loading
+            loadingIndicator.style.display = 'block';
+            errorContainer.style.display = 'none';
+            noRecordingsContainer.style.display = 'none';
+            recordingsList.style.display = 'none';
+
+            try {
+                const response = await fetch('/api/recordings');
+                const data = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(data.error || 'Failed to fetch recordings');
+                }
+
+                allRecordings = data.recordings || [];
+                filteredRecordings = [...allRecordings];
+
+                updateStats();
+                displayRecordings();
+            } catch (error) {
+                console.error('Error loading recordings:', error);
+                showError('Failed to load recordings: ' + error.message);
+            } finally {
+                loadingIndicator.style.display = 'none';
+            }
+        }
+
+        // Update statistics
+        function updateStats() {
+            const totalRecordings = allRecordings.length;
+            const totalSize = allRecordings.reduce((sum, recording) => {
+                return sum + (recording.files.wav?.size || 0) + (recording.files.mp3?.size || 0);
+            }, 0);
+            const latestRecording = allRecordings.length > 0 ? 
+                new Date(allRecordings[0].created).toLocaleDateString() : 'None';
+
+            document.getElementById('totalRecordings').textContent = totalRecordings;
+            document.getElementById('totalSize').textContent = formatFileSize(totalSize);
+            document.getElementById('latestRecording').textContent = latestRecording;
+        }
+
+        // Display recordings in cards
+        function displayRecordings() {
+            const noRecordingsContainer = document.getElementById('noRecordingsContainer');
+            const recordingsList = document.getElementById('recordingsList');
+
+            if (filteredRecordings.length === 0) {
+                noRecordingsContainer.style.display = 'block';
+                recordingsList.style.display = 'none';
+                return;
+            }
+
+            noRecordingsContainer.style.display = 'none';
+            recordingsList.style.display = 'block';
+
+            recordingsList.innerHTML = '';
+
+            filteredRecordings.forEach(recording => {
+                const card = document.createElement('div');
+                card.className = 'recording-card';
+                card.setAttribute('data-call-id', recording.callId);
+                
+                const hasWav = recording.files.wav;
+                const hasMp3 = recording.files.mp3;
+                
+                card.innerHTML = `
+                    <div class="recording-header">
+                        <div class="call-info">
+                            <h3>Call Recording</h3>
+                            <div class="call-id" title="Click to show full ID" onclick="toggleCallId(this)" style="cursor: pointer;">
+                                ${recording.callId.substring(0, 35)}...
+                            </div>
+                            <div class="full-call-id" style="display: none; font-size: 10px; color: #999; margin-top: 4px; word-break: break-all;">
+                                ${recording.callId}
+                            </div>
+                        </div>
+                        <div class="datetime">${formatDateTime(recording.created)}</div>
+                    </div>
+                    
+                    <div class="file-list">
+                        ${hasMp3 ? `
+                            <div class="file-item">
+                                <div class="file-details">
+                                    <div class="file-name">
+                                        <i class="fas fa-music"></i> MP3 Audio
+                                    </div>
+                                    <div class="file-size">${formatFileSize(recording.files.mp3.size)}</div>
+                                </div>
+                                <div class="file-actions">
+                                    <button class="action-icon play-icon" 
+                                            onclick="playRecording('${recording.files.mp3.playUrl}', '${recording.callId}', '${formatDateTime(recording.created)}', 'mp3', this)"
+                                            title="Play MP3">
+                                        <i class="fas fa-play"></i>
+                                    </button>
+                                    <a href="${recording.files.mp3.downloadUrl}" 
+                                       class="action-icon download-icon" 
+                                       download
+                                       title="Download MP3">
+                                        <i class="fas fa-download"></i>
+                                    </a>
+                                </div>
+                            </div>
+                        ` : ''}
+                        ${hasWav ? `
+                            <div class="file-item">
+                                <div class="file-details">
+                                    <div class="file-name">
+                                        <i class="fas fa-file-audio"></i> WAV Audio
+                                    </div>
+                                    <div class="file-size">${formatFileSize(recording.files.wav.size)}</div>
+                                </div>
+                                <div class="file-actions">
+                                    <button class="action-icon play-icon" 
+                                            onclick="playRecording('${recording.files.wav.playUrl}', '${recording.callId}', '${formatDateTime(recording.created)}', 'wav', this)"
+                                            title="Play WAV">
+                                        <i class="fas fa-play"></i>
+                                    </button>
+                                    <a href="${recording.files.wav.downloadUrl}" 
+                                       class="action-icon download-icon" 
+                                       download
+                                       title="Download WAV">
+                                        <i class="fas fa-download"></i>
+                                    </a>
+                                </div>
+                            </div>
+                        ` : ''}
+                    </div>
+                `;
+                
+                recordingsList.appendChild(card);
+            });
+        }
+
+
+
+        // Filter recordings based on search
+        function filterRecordings(searchTerm) {
+            if (!searchTerm.trim()) {
+                filteredRecordings = [...allRecordings];
+            } else {
+                const term = searchTerm.toLowerCase();
+                filteredRecordings = allRecordings.filter(recording => 
+                    recording.callId.toLowerCase().includes(term) ||
+                    formatDateTime(recording.created).toLowerCase().includes(term)
+                );
+            }
+            displayRecordings();
+        }
+
+        // Toggle call ID display
+        function toggleCallId(element) {
+            const fullId = element.nextElementSibling;
+            if (fullId.style.display === 'none') {
+                fullId.style.display = 'block';
+                element.style.color = '#25D366';
+            } else {
+                fullId.style.display = 'none';
+                element.style.color = '#6c757d';
+            }
+        }
+
+        // Global audio player
+        let currentAudio = null;
+        let currentNotification = null;
+        let currentPlayingButton = null;
+
+        // Play recording - Simple approach with single audio control
+        function playRecording(playUrl, callId, timestamp, format, buttonElement) {
+            console.log('Playing:', playUrl);
+            
+            // Stop any currently playing audio
+            if (currentAudio) {
+                currentAudio.pause();
+                currentAudio = null;
+            }
+            
+            // Reset previous playing button
+            if (currentPlayingButton) {
+                currentPlayingButton.innerHTML = '<i class="fas fa-play"></i>';
+                currentPlayingButton.style.background = '#25D366';
+                currentPlayingButton = null;
+            }
+            
+            // Remove any existing notification
+            if (currentNotification && currentNotification.parentNode) {
+                currentNotification.parentNode.removeChild(currentNotification);
+            }
+            
+            // Create a simple audio element and play it
+            const audio = new Audio(playUrl);
+            audio.controls = true;
+            audio.preload = 'auto';
+            currentAudio = audio;
+            
+            // Show a simple notification with controls
+            const notification = document.createElement('div');
+            notification.style.cssText = `
+                position: fixed;
+                top: 20px;
+                right: 20px;
+                background: #25D366;
+                color: white;
+                padding: 15px 20px;
+                border-radius: 8px;
+                z-index: 10000;
+                font-family: Arial, sans-serif;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+                min-width: 300px;
+            `;
+            notification.innerHTML = `
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                    <div style="font-weight: bold;">Playing Recording</div>
+                    <button onclick="stopCurrentAudio()" style="background: rgba(255,255,255,0.2); color: white; border: none; padding: 5px 8px; border-radius: 4px; cursor: pointer; font-size: 12px;">×</button>
+                </div>
+                <div style="font-size: 12px; opacity: 0.9; margin-bottom: 5px;">${format.toUpperCase()} • ${timestamp}</div>
+                <div style="font-size: 10px; opacity: 0.8; margin-bottom: 10px;">Call ID: ${callId.substring(0, 20)}...</div>
+            `;
+            
+            // Add audio controls
+            const audioContainer = document.createElement('div');
+            audioContainer.style.cssText = `
+                margin-top: 10px;
+                background: rgba(255,255,255,0.1);
+                padding: 10px;
+                border-radius: 4px;
+            `;
+            audioContainer.appendChild(audio);
+            notification.appendChild(audioContainer);
+            
+            document.body.appendChild(notification);
+            currentNotification = notification;
+            
+            // Update button to show it's playing
+            if (buttonElement) {
+                currentPlayingButton = buttonElement;
+                buttonElement.innerHTML = '<i class="fas fa-pause"></i>';
+                buttonElement.style.background = '#dc3545';
+            }
+            
+            // Auto-remove notification when audio ends
+            audio.addEventListener('ended', function() {
+                if (currentNotification && currentNotification.parentNode) {
+                    currentNotification.parentNode.removeChild(currentNotification);
+                    currentNotification = null;
+                }
+                if (currentPlayingButton) {
+                    currentPlayingButton.innerHTML = '<i class="fas fa-play"></i>';
+                    currentPlayingButton.style.background = '#25D366';
+                    currentPlayingButton = null;
+                }
+                currentAudio = null;
+            });
+            
+            // Play the audio
+            audio.play().catch(error => {
+                console.log('Auto-play prevented, user needs to interact first');
+                // Show a manual play button
+                const playButton = document.createElement('button');
+                playButton.textContent = 'Click to Play';
+                playButton.style.cssText = `
+                    background: white; 
+                    color: #25D366; 
+                    border: none; 
+                    padding: 8px 15px; 
+                    border-radius: 4px; 
+                    cursor: pointer;
+                    margin-top: 10px;
+                    font-size: 12px;
+                `;
+                playButton.onclick = function() {
+                    audio.play();
+                    playButton.remove();
+                };
+                audioContainer.appendChild(playButton);
+            });
+        }
+
+        // Stop current audio function
+        function stopCurrentAudio() {
+            if (currentAudio) {
+                currentAudio.pause();
+                currentAudio = null;
+            }
+            if (currentNotification && currentNotification.parentNode) {
+                currentNotification.parentNode.removeChild(currentNotification);
+                currentNotification = null;
+            }
+            if (currentPlayingButton) {
+                currentPlayingButton.innerHTML = '<i class="fas fa-play"></i>';
+                currentPlayingButton.style.background = '#25D366';
+                currentPlayingButton = null;
+            }
+        }
+
+
+
+        // Show error message
+        function showError(message) {
+            const errorContainer = document.getElementById('errorContainer');
+            errorContainer.innerHTML = `<div class="error">${message}</div>`;
+            errorContainer.style.display = 'block';
+        }
+
+        // Format file size
+        function formatFileSize(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        // Format date and time
+        function formatDateTime(dateString) {
+            try {
+                if (!dateString) {
+                    return 'Unknown Date';
+                }
+                const date = new Date(dateString);
+                if (isNaN(date.getTime())) {
+                    return 'Invalid Date';
+                }
+                return date.toLocaleString('en-US', {
+                    year: 'numeric',
+                    month: '2-digit',
+                    day: '2-digit',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit'
+                });
+            } catch (error) {
+                console.error('Error formatting date:', error, dateString);
+                return 'Invalid Date';
+            }
+        }
+
+        // Close audio player when clicking outside
+        document.addEventListener('click', function(event) {
+            const audioPlayer = document.getElementById('audioPlayer');
+            if (!audioPlayer.contains(event.target) && !event.target.closest('.btn-play')) {
+                closeAudioPlayer();
+            }
+        });
+    </script>
+</body>
+</html>

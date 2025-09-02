@@ -1,0 +1,896 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WhatsApp WebRTC Bridge</title>
+  <script src="/socket.io/socket.io.js"></script>
+  <style>
+    body {
+      font-family: 'Segoe UI', sans-serif;
+      margin: 0;
+      background-color: #f5f5f5;
+    }
+
+    h1 {
+      text-align: center;
+      margin-top: 50px;
+      font-size: 50px;
+    }
+
+    p.description {
+      text-align: center;
+      color: #666;
+      max-width: 500px;
+      margin: 10px auto 30px;
+      font-size: 14px;
+    }
+
+    #overlay {
+      display: none;
+      position: fixed;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      background: rgba(0, 0, 0, 0.5);
+      z-index: 999;
+    }
+
+    #modal {
+      display: none;
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      width: 300px;
+      transform: translate(-50%, -50%);
+      background: #fff;
+      padding: 30px;
+      border-radius: 20px;
+      text-align: center;
+      z-index: 1000;
+      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.2);
+      animation: slideDown 0.3s ease-in-out;
+    }
+
+    @keyframes slideDown {
+      from { opacity: 0; transform: translate(-50%, -60%); }
+      to { opacity: 1; transform: translate(-50%, -50%); }
+    }
+
+    .modal-header {
+      margin-bottom: 20px;
+    }
+
+    .modal-title {
+      font-size: 20px;
+      font-weight: bold;
+      color: #333;
+    }
+
+    .modal-subtitle {
+      font-size: 14px;
+      color: #777;
+      margin-top: 5px;
+    }
+
+    .call-buttons {
+      display: flex;
+      justify-content: space-around;
+      margin-top: 20px;
+    }
+
+    .circle-btn {
+      width: 60px;
+      height: 60px;
+      border: none;
+      border-radius: 50%;
+      font-size: 26px;
+      color: white;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: transform 0.2s ease;
+    }
+
+    .circle-btn:hover {
+      transform: scale(1.1);
+    }
+
+    .accept {
+      background-color: #28a745;
+    }
+
+    .reject {
+      background-color: #dc3545;
+    }
+
+    #call-timer {
+      text-align: center;
+      font-size: 18px;
+      display: none;
+      margin-top: 10px;
+    }
+
+    #call-duration-result {
+      text-align: center;
+      font-size: 18px;
+      color: #dc3545;
+      margin-top: 10px;
+    }
+
+    .ringing {
+      animation: pulse 1s infinite ease-in-out;
+    }
+
+    @keyframes pulse {
+      0% { box-shadow: 0 0 0 0 rgba(40, 167, 69, 0.3); }
+      70% { box-shadow: 0 0 0 10px rgba(40, 167, 69, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(40, 167, 69, 0); }
+    }
+  </style>
+</head>
+<body>
+  <h1>WhatsApp WebRTC Bridge</h1>
+  <p class="description">
+    This web app is intended to receive incoming WhatsApp API calls and make outgoing calls.
+    When a call arrives, a modal will appear allowing you to accept or reject it.
+  </p>
+
+  <!-- Outgoing Call Section -->
+  <div class="card">
+    <h3>📞 Make Outgoing Call</h3>
+    <form id="outgoing-call-form">
+      <div class="form-group">
+        <label for="phone-number">Phone Number:</label>
+        <input type="text" id="phone-number" placeholder="+1234567890" required>
+      </div>
+      <div class="form-group">
+        <label for="caller-name">Caller Name (Optional):</label>
+        <input type="text" id="caller-name" placeholder="Your Name">
+      </div>
+      <button type="submit" class="btn btn-primary">📞 Call</button>
+    </form>
+    <div id="outgoing-call-status" class="status"></div>
+    
+    <!-- Outbound call controls -->
+    <div id="outbound-call-controls" style="display: none; margin-top: 15px;">
+      <button id="reject-outbound-btn" class="btn btn-danger">❌ Reject Call</button>
+      <button id="terminate-outbound-btn" class="btn btn-warning">🔴 End Call</button>
+    </div>
+  </div>
+
+  <h2 id="call-status" style="text-align:center; color:#333; font-weight:normal;"></h2>
+
+  <h3 id="active-caller-name" style="text-align:center; color:#555; display:none;"></h3>
+  <div id="call-timer">⏱️ Call duration: <span id="timer">00:00</span></div>
+  <div id="call-duration-result"></div>
+
+  <button id="terminate-btn"
+        style="display: none; margin: 10px auto; background-color: #dc3545; color: white; padding: 10px 20px; border: none; border-radius: 8px; cursor: pointer; font-size: 16px;"
+        onclick="terminateCall()">
+  Terminate Call
+  </button>
+
+  <div id="overlay"></div>
+  <div id="modal" class="ringing">
+    <div class="modal-header">
+      <div class="modal-title" id="caller-name">📲 Incoming WhatsApp Call</div>
+      <div class="modal-subtitle" id="caller-number"></div>
+      <div class="modal-subtitle">Tap to answer or decline</div>
+    </div>
+    <div class="call-buttons">
+      <button class="circle-btn accept" onclick="respond('accept')" title="Accept Call">
+          <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" fill="white" viewBox="0 0 24 24">
+            <path d="M6.62 10.79a15.053 15.053 0 006.59 6.59l2.2-2.2a1 1 0 011.05-.24 11.72 11.72 0 003.7.59 1 1 0 011 1v3.45a1 1 0 01-1 1A17 17 0 013 5a1 1 0 011-1h3.45a1 1 0 011 1 11.72 11.72 0 00.59 3.7 1 1 0 01-.24 1.05l-2.18 2.2z"/>
+          </svg>
+        </button>
+        <button class="circle-btn reject" onclick="respond('reject')" title="Reject Call">
+            <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" fill="white" viewBox="0 0 24 24">
+              <path d="M14.4267305,12.3239887 C13.8091494,12.1184418 12.9237465,12.0002 11.9967657,12 C11.0703845,11.9998001 10.1850309,12.1179592 9.56735459,12.323626 C9.29781857,12.4133731 9.10254274,12.5124903 8.99818889,12.5994146 L8.99818886,13.4997844 C8.99830883,14.0560874 8.98526108,14.3378275 8.91482312,14.6766528 C8.76529679,15.3959143 8.36503921,15.9530303 7.5979407,15.9971778 C5.57992549,16.3324217 4.23196922,16.5 3.49954722,16.5 C2.04222339,16.5 1,15.1968274 1,14 L1,12.5 C1,8.77610714 6.02664974,5.99871171 11.9971973,6.00000002 C17.9690798,6.00128863 22.993963,8.77688238 22.9935942,12.4728433 C22.9981103,12.6390833 23.0000363,12.8114009 22.9999995,13.0054528 C22.9999727,13.1468201 22.9992073,13.2587316 22.9969405,13.5090552 C22.9947039,13.7560368 22.993963,13.8651358 22.993963,14 C22.993963,15.1895648 21.9503425,16.5 20.4944157,16.5 C19.7626874,16.5 18.4165903,16.332739 16.4017544,15.9981299 C15.3495506,15.9554142 15.0603932,15.1844357 15.0052983,14.044091 C14.9974219,13.8810653 14.9958289,13.7545264 14.9957743,13.5011312 C14.9956956,12.9832104 14.9956891,12.9405386 14.9957547,12.5995238 C14.8913892,12.5126847 14.6961745,12.4136666 14.4267305,12.3239887 Z M6.99818889,13.5 L6.99818889,12.5 C6.99818889,10.7340787 9.20464625,9.99939745 11.9971973,10 C14.7913808,10.0006029 16.9957741,10.7342819 16.9957741,12.5 C16.9956885,12.9366661 16.9956885,12.9366661 16.995774,13.4997844 C16.995822,13.7225055 16.9971357,13.8268559 17.0029681,13.9475751 C17.0051195,13.992103 17.0078746,14.0335402 17.0110607,14.0715206 C18.7614943,14.3571487 19.9381265,14.5 20.4944157,14.5 C20.7329265,14.5 20.993963,14.1722263 20.993963,14 C20.993963,13.8570865 20.9947313,13.7439632 20.9970225,13.4909448 C20.9992358,13.2465315 20.9999742,13.1385601 20.9999995,13.0050735 C21.0000331,12.8280282 20.998305,12.6734088 20.993963,12.5 C20.993963,10.2010869 17.0111151,8.00108196 11.9967657,7.99999998 C6.98400975,7.99891833 3,10.2002196 3,12.5 L3,14 C3,14.1781726 3.2573842,14.5 3.49954722,14.5 C4.05591217,14.5 5.23278898,14.3571098 6.98361703,14.071404 C6.99451507,13.9374564 6.99824508,13.76066 6.99818889,13.5 Z"></path>
+            </svg>
+        </button>
+    </div>
+  </div>
+
+  <script>
+    const socket = io();
+    let pc;
+    let callStartTime = null;
+    let timerInterval = null;
+    let localStream = null;
+    let activeCallerName = "";
+    let incomingCallId = "";
+    const callStatusEl = document.getElementById("call-status");
+
+    // Debug socket connection
+    socket.on("connect", () => {
+      console.log("🔌 Socket.IO connected with ID:", socket.id);
+    });
+
+    socket.on("disconnect", () => {
+      console.log("🔌 Socket.IO disconnected");
+    });
+
+    socket.on("connect_error", (error) => {
+      console.error("🔌 Socket.IO connection error:", error);
+    });
+
+    // Outgoing call form handling
+    document.getElementById("outgoing-call-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      
+      const phoneNumber = document.getElementById("phone-number").value.trim();
+      const callerName = document.getElementById("caller-name").value.trim();
+      const statusEl = document.getElementById("outgoing-call-status");
+      
+      if (!phoneNumber) {
+        statusEl.textContent = "Please enter a phone number";
+        statusEl.style.color = "#dc3545";
+        return;
+      }
+
+      statusEl.textContent = "Initiating call...";
+      statusEl.style.color = "#666";
+
+      try {
+        const response = await fetch("/initiate-call", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            phoneNumber,
+            callerName: callerName || "Outgoing Call"
+          })
+        });
+
+        const result = await response.json();
+        
+        if (result.success) {
+          statusEl.textContent = `Call initiated to ${phoneNumber}. Waiting for answer...`;
+          statusEl.style.color = "#28a745";
+        } else {
+          statusEl.textContent = `Failed to initiate call: ${result.error}`;
+          statusEl.style.color = "#dc3545";
+        }
+      } catch (error) {
+        statusEl.textContent = `Error: ${error.message}`;
+        statusEl.style.color = "#dc3545";
+      }
+    });
+
+    // Outgoing call socket events
+    socket.on("outgoing-call-initiated", ({ callId, phoneNumber, callerName }) => {
+      console.log("Outgoing call initiated:", callId);
+      document.getElementById("outgoing-call-status").textContent = 
+        `📞 Calling ${phoneNumber}...`;
+      document.getElementById("outgoing-call-status").style.color = "#ffc107";
+      
+      // Show outbound call controls
+      document.getElementById("outbound-call-controls").style.display = "block";
+    });
+
+    socket.on("outgoing-call-rejected", ({ callId, phoneNumber }) => {
+      console.log("Outgoing call rejected:", callId);
+      document.getElementById("outgoing-call-status").textContent = 
+        `❌ Call rejected by ${phoneNumber}`;
+      document.getElementById("outgoing-call-status").style.color = "#dc3545";
+      
+      // Hide outbound call controls
+      document.getElementById("outbound-call-controls").style.display = "none";
+      
+      // Clear state after a delay
+      setTimeout(clearOutgoingCallState, 3000);
+    });
+
+    socket.on("outgoing-call-timeout", ({ callId, phoneNumber }) => {
+      console.log("Outgoing call timed out:", callId);
+      document.getElementById("outgoing-call-status").textContent = 
+        `⏰ Call to ${phoneNumber} timed out`;
+      document.getElementById("outgoing-call-status").style.color = "#ffc107";
+      
+      // Hide outbound call controls
+      document.getElementById("outbound-call-controls").style.display = "none";
+      
+      // Clear state after a delay
+      setTimeout(clearOutgoingCallState, 3000);
+    });
+
+    socket.on("outgoing-call-connected", ({ callId, phoneNumber }) => {
+      console.log("Outgoing call connected:", callId);
+      console.log("🎤 WhatsApp call answered - starting WebRTC immediately");
+      console.log("Call ID:", callId);
+      console.log("Phone Number:", phoneNumber);
+      
+      document.getElementById("outgoing-call-status").textContent = 
+        `✅ Call answered by ${phoneNumber}. Connecting...`;
+      document.getElementById("outgoing-call-status").style.color = "#28a745";
+      
+      // Show terminate button only (reject is not applicable for answered calls)
+      document.getElementById("reject-outbound-btn").style.display = "none";
+      document.getElementById("terminate-outbound-btn").style.display = "inline-block";
+      
+      // START WebRTC immediately - same as incoming calls
+      console.log("🚀 Starting WebRTC connection now...");
+      startWebRTC();
+    });
+
+    // Handle WebRTC errors from server
+    socket.on("webrtc-error", ({ error }) => {
+      console.error("❌ WebRTC error from server:", error);
+      document.getElementById("outgoing-call-status").textContent = 
+        `❌ WebRTC Error: ${error}`;
+      document.getElementById("outgoing-call-status").style.color = "#dc3545";
+    });
+
+    // Outbound call control event listeners
+    document.getElementById("reject-outbound-btn").addEventListener("click", () => {
+      console.log("Rejecting outbound call...");
+      socket.emit("reject-outbound-call");
+      document.getElementById("outgoing-call-status").textContent = "❌ Call rejected";
+      document.getElementById("outgoing-call-status").style.color = "#dc3545";
+      document.getElementById("outbound-call-controls").style.display = "none";
+      setTimeout(clearOutgoingCallState, 3000);
+    });
+
+    document.getElementById("terminate-outbound-btn").addEventListener("click", () => {
+      console.log("Terminating outbound call...");
+      socket.emit("terminate-outbound-call");
+      document.getElementById("outgoing-call-status").textContent = "🔴 Call ended";
+      document.getElementById("outgoing-call-status").style.color = "#dc3545";
+      document.getElementById("outbound-call-controls").style.display = "none";
+      
+      // Cleanup WebRTC
+      if (pc) {
+        pc.close();
+        pc = null;
+      }
+      
+      setTimeout(clearOutgoingCallState, 3000);
+    });
+
+    function startCallTimer() {
+      callStartTime = Date.now();
+      document.getElementById("call-timer").style.display = "block";
+
+      timerInterval = setInterval(() => {
+        const elapsedMs = Date.now() - callStartTime;
+        const seconds = Math.floor(elapsedMs / 1000);
+        const mins = Math.floor(seconds / 60);
+        const secs = seconds % 60;
+        document.getElementById("timer").textContent =
+          `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+      }, 1000);
+    }
+
+    function stopCallTimer() {
+      clearInterval(timerInterval);
+      timerInterval = null;
+
+      const elapsedMs = Date.now() - callStartTime;
+      const seconds = Math.floor(elapsedMs / 1000);
+      const mins = Math.floor(seconds / 60);
+      const secs = seconds % 60;
+
+      const duration = `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+      document.getElementById("call-timer").style.display = "none";
+      document.getElementById("call-duration-result").textContent =
+        `📴 Call ended. Duration: ${duration}`;
+    }
+
+    socket.on("call-is-coming", ({ callId, callerName, callerNumber }) => {
+      console.log("WhatsApp call detected:", callId);
+      
+      // Check if we're currently in an outgoing call state
+      const outgoingStatus = document.getElementById("outgoing-call-status").textContent;
+      if (outgoingStatus.includes("Calling") || outgoingStatus.includes("connected") || outgoingStatus.includes("answered")) {
+        console.log("Ignoring incoming call modal - we're in outgoing call state");
+        return;
+      }
+      
+      activeCallerName = callerName;
+      incomingCallId = callId;
+
+      document.getElementById("caller-name").textContent = "📲 Incoming WhatsApp Call";
+      document.getElementById("caller-number").textContent = `${callerName} (${callerNumber})`;
+
+      callStatusEl.textContent = "📲 Incoming WhatsApp Call...";
+      document.getElementById("modal").style.display = "block";
+      document.getElementById("overlay").style.display = "block";
+    });
+
+    socket.on("start-browser-timer", () => {
+      console.log("Call accepted — starting timer.");
+      startCallTimer();
+    });
+
+    socket.on("call-ended", () => {
+      console.log("Call ended by server.");
+      callStatusEl.textContent = "WhatsApp API Call";
+      document.getElementById("active-caller-name").style.display = "none";
+      stopCallTimer();
+
+      if (pc) {
+        pc.close();
+        pc = null;
+      }
+
+      callStatusEl.textContent = "";
+      document.getElementById("active-caller-name").style.display = "none";
+      document.getElementById("terminate-btn").style.display = "none";
+
+      // Clear outgoing call state
+      clearOutgoingCallState();
+
+      // Remove any dynamic audio elements
+      document.querySelectorAll("audio").forEach(audio => audio.remove());
+    });
+
+    function clearOutgoingCallState() {
+      const statusEl = document.getElementById("outgoing-call-status");
+      statusEl.textContent = "";
+      statusEl.style.color = "#666";
+      
+      // Clear any buttons
+      const buttons = statusEl.querySelectorAll("button");
+      buttons.forEach(btn => btn.remove());
+    }
+
+    socket.on("browser-answer", async (sdp) => {
+      console.log("=== BROWSER SDP ANSWER RECEIVED ===");
+      console.log("SDP Type: answer");
+      console.log("SDP Length:", sdp.length, "characters");
+      console.log("SDP Content:");
+      console.log("----------------------------------------");
+      console.log(sdp);
+      console.log("----------------------------------------");
+      
+      // Parse and log SDP details
+      const sdpLines = sdp.split('\r\n');
+      console.log("SDP Analysis:");
+      console.log("- Total lines:", sdpLines.length);
+      console.log("- Media sections:", sdpLines.filter(line => line.startsWith('m=')).length);
+      console.log("- ICE candidates:", sdpLines.filter(line => line.startsWith('a=candidate:')).length);
+      console.log("- Codecs:", sdpLines.filter(line => line.startsWith('a=rtpmap:')).map(line => line.split(' ')[1]));
+      console.log("=== END BROWSER SDP ANSWER ===\n");
+      
+      // Check if peer connection exists and is in the right state
+      if (!pc) {
+        console.error("❌ No peer connection available for SDP answer");
+        return;
+      }
+      
+      console.log("🔍 Current peer connection state before setting remote description:");
+      console.log("- Signaling state:", pc.signalingState);
+      console.log("- Connection state:", pc.connectionState);
+      console.log("- ICE connection state:", pc.iceConnectionState);
+      
+      try {
+        // Only set remote description if we're not already stable
+        if (pc.signalingState !== 'stable') {
+          await pc.setRemoteDescription(new RTCSessionDescription({ type: "answer", sdp }));
+          console.log("✅ Browser SDP answer set as remote description");
+          console.log("New signaling state:", pc.signalingState);
+        } else {
+          console.log("⚠️ Peer connection already stable, skipping remote description");
+          console.log("This is normal for outgoing calls where SDP negotiation is already complete");
+        }
+      } catch (error) {
+        console.error("❌ Error setting remote description:", error);
+        console.error("Error details:", error.message);
+      }
+    });
+
+    socket.on("browser-candidate", async (candidate) => {
+      console.log("🧊 Received ICE candidate from server");
+      try {
+        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+        console.log("✅ ICE candidate added successfully");
+      } catch (error) {
+        console.error("❌ Error adding ICE candidate:", error);
+      }
+    });
+
+    // Handle offer replacement from server (for outgoing calls)
+    socket.on("browser-offer-replacement", async (sdp) => {
+      console.log("=== BROWSER OFFER REPLACEMENT RECEIVED ===");
+      console.log("SDP Type: offer (replacement from server)");
+      console.log("SDP Length:", sdp.length, "characters");
+      console.log("This is the original SDP that was sent to WhatsApp");
+      
+      if (!pc) {
+        console.error("❌ No peer connection available for offer replacement");
+        return;
+      }
+      
+      try {
+        console.log("🔍 Current peer connection state before replacement:");
+        console.log("- Signaling state:", pc.signalingState);
+        console.log("- Connection state:", pc.connectionState);
+        console.log("- ICE connection state:", pc.iceConnectionState);
+        
+        // We need to reset the peer connection to set a new local offer
+        // because you cannot change local description once it's set
+        console.log("🔄 Resetting peer connection to accept new offer");
+        
+        // Store the current stream to re-add it
+        const currentStream = pc.getLocalStreams ? pc.getLocalStreams()[0] : null;
+        const currentTracks = [];
+        
+        if (pc.getSenders) {
+          pc.getSenders().forEach(sender => {
+            if (sender.track) {
+              currentTracks.push(sender.track);
+            }
+          });
+        }
+        
+        // Close the current peer connection
+        pc.close();
+        
+        // Create a new peer connection
+        pc = new RTCPeerConnection({
+          iceServers: [{ urls: "stun:stun.relay.metered.ca:80" }],
+        });
+        
+        // Re-setup event handlers
+        setupPeerConnectionHandlers();
+        
+        // Re-add the tracks
+        currentTracks.forEach(track => {
+          if (currentStream) {
+            pc.addTrack(track, currentStream);
+            console.log("✅ Re-added track:", track.kind, track.id);
+          }
+        });
+        
+        // Now set the original offer as local description
+        await pc.setLocalDescription(new RTCSessionDescription({ type: "offer", sdp }));
+        console.log("✅ Original offer set as local description (after reset)");
+        console.log("Now the browser will use the same offer that WhatsApp received");
+        
+      } catch (error) {
+        console.error("❌ Error setting offer replacement:", error);
+        console.error("Error details:", error.message);
+        console.error("Stack trace:", error.stack);
+      }
+    });
+
+    function terminateCall() {
+      console.log("Call manually terminated.");
+
+      // Notify backend if needed
+      socket.emit("terminate-call", incomingCallId);
+
+      // Reset UI
+      callStatusEl.textContent = "";
+      document.getElementById("active-caller-name").style.display = "none";
+      document.getElementById("terminate-btn").style.display = "none";
+
+      stopCallTimer();
+
+      // Cleanup WebRTC connection
+      if (pc) {
+        pc.close();
+        pc = null;
+      }
+
+      // Remove any dynamic audio elements
+      document.querySelectorAll("audio").forEach(audio => audio.remove());
+    }
+
+    function respond(choice) {
+      document.getElementById("modal").style.display = "none";
+      document.getElementById("overlay").style.display = "none";
+
+      if (choice === "accept") {
+        callStatusEl.textContent = "🔴 In Call";
+        document.getElementById("active-caller-name").textContent = `With ${activeCallerName}`;
+        document.getElementById("active-caller-name").style.display = "block";
+        document.getElementById("call-duration-result").textContent = "";
+        document.getElementById("terminate-btn").style.display = "block";
+
+        startWebRTC();
+      } else {
+        socket.emit("reject-call", incomingCallId);
+        callStatusEl.textContent = "";
+        document.getElementById("active-caller-name").style.display = "none";
+      }
+    }
+
+    function setupPeerConnectionHandlers() {
+      // Handle incoming audio from WhatsApp
+      pc.ontrack = (e) => {
+        console.log("🎵 Browser received audio track from server");
+        console.log("Track kind:", e.track.kind);
+        console.log("Track enabled:", e.track.enabled);
+        console.log("Track readyState:", e.track.readyState);
+        console.log("Number of streams:", e.streams.length);
+        console.log("Stream ID:", e.streams[0]?.id);
+        console.log("Track ID:", e.track.id);
+        
+        // Additional debugging for audio stream
+        if (e.streams && e.streams.length > 0) {
+          const stream = e.streams[0];
+          console.log("🎵 Stream details:");
+          console.log("- Stream ID:", stream.id);
+          console.log("- Stream active:", stream.active);
+          console.log("- Stream tracks:", stream.getTracks().length);
+          stream.getTracks().forEach((track, index) => {
+            console.log(`  Track ${index}:`, {
+              kind: track.kind,
+              enabled: track.enabled,
+              readyState: track.readyState,
+              muted: track.muted,
+              id: track.id
+            });
+          });
+        }
+        
+        // Check if we already have an audio element
+        let audio = document.querySelector('audio[data-whatsapp-audio="true"]');
+        
+        if (audio) {
+          console.log("🔄 Updating existing audio element");
+          audio.srcObject = e.streams[0];
+        } else {
+          console.log("🆕 Creating new audio element");
+          audio = document.createElement('audio');
+          audio.srcObject = e.streams[0];
+          audio.autoplay = true;
+          audio.muted = false;
+          audio.volume = 1.0;
+          audio.setAttribute('data-whatsapp-audio', 'true');
+          
+          // Add event listeners to debug audio issues
+          audio.onloadedmetadata = () => {
+            console.log("✅ Audio metadata loaded");
+            console.log("Audio duration:", audio.duration);
+            console.log("Audio readyState:", audio.readyState);
+            console.log("Audio paused:", audio.paused);
+          };
+          
+          audio.oncanplay = () => {
+            console.log("✅ Audio can play");
+          };
+          
+          audio.onplay = () => {
+            console.log("✅ Audio started playing");
+          };
+          
+          audio.onpause = () => {
+            console.log("⏸️ Audio paused");
+          };
+          
+          audio.onended = () => {
+            console.log("⏹️ Audio ended");
+          };
+          
+          audio.onerror = (error) => {
+            console.error("❌ Audio error:", error);
+          };
+          
+          document.body.appendChild(audio);
+          console.log("✅ Audio element created and added to page");
+        }
+        
+        // Try to play the audio (for both new and existing elements)
+        if (audio) {
+          // Ensure the audio element is properly configured
+          audio.muted = false;
+          audio.volume = 1.0;
+          audio.autoplay = true;
+          
+          console.log("🎵 Attempting to play audio...");
+          console.log("Audio muted:", audio.muted);
+          console.log("Audio volume:", audio.volume);
+          console.log("Audio autoplay:", audio.autoplay);
+          console.log("Audio readyState:", audio.readyState);
+          
+          // Check if the audio context needs to be resumed
+          if (window.audioContext && window.audioContext.state === 'suspended') {
+            window.audioContext.resume().then(() => {
+              console.log("✅ Audio context resumed");
+            });
+          }
+          
+          audio.play().then(() => {
+            console.log("✅ Audio play() succeeded");
+            
+            // Set up periodic audio level monitoring
+            const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            
+            // Resume audio context if it's suspended
+            if (audioContext.state === 'suspended') {
+              audioContext.resume().then(() => {
+                console.log("✅ Audio context resumed");
+              });
+            }
+            
+            const analyser = audioContext.createAnalyser();
+            const source = audioContext.createMediaStreamSource(e.streams[0]);
+            source.connect(analyser);
+            
+            const dataArray = new Uint8Array(analyser.frequencyBinCount);
+            
+            const checkAudioLevel = () => {
+              analyser.getByteFrequencyData(dataArray);
+              const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
+              console.log("🎵 Audio level:", average);
+              
+              if (average > 0) {
+                console.log("✅ Audio data is flowing!");
+              }
+            };
+            
+            // Check audio level every 2 seconds
+            const audioCheckInterval = setInterval(checkAudioLevel, 2000);
+            
+            // Stop checking after 10 seconds
+            setTimeout(() => {
+              clearInterval(audioCheckInterval);
+              console.log("🔚 Stopped audio level monitoring");
+            }, 10000);
+            
+          }).catch((error) => {
+            console.error("❌ Audio play() failed:", error);
+            console.error("Error details:", error.message);
+            
+            // Try to create and resume audio context if it's suspended
+            const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            if (audioContext.state === 'suspended') {
+              audioContext.resume().then(() => {
+                console.log("✅ Audio context resumed, trying to play again");
+                audio.play().catch(err => console.error("❌ Still failed to play audio:", err));
+              });
+            }
+          });
+          
+          console.log("Audio element muted:", audio.muted);
+          console.log("Audio element volume:", audio.volume);
+          console.log("Audio element readyState:", audio.readyState);
+          console.log("Audio element paused:", audio.paused);
+        }
+      };
+
+      // Send ICE candidates to the backend
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          console.log("🧊 Sending ICE candidate to server");
+          socket.emit("browser-candidate", event.candidate);
+        }
+      };
+
+      // Log connection state changes
+      pc.onconnectionstatechange = () => {
+        console.log("🔗 Connection state changed:", pc.connectionState);
+        if (pc.connectionState === "connected") {
+          console.log("✅ WebRTC connection established - audio should start flowing");
+        } else if (pc.connectionState === "failed") {
+          console.error("❌ WebRTC connection failed");
+        }
+      };
+
+      // Log ICE connection state changes
+      pc.oniceconnectionstatechange = () => {
+        console.log("🧊 ICE connection state changed:", pc.iceConnectionState);
+        if (pc.iceConnectionState === "connected") {
+          console.log("✅ ICE connection established - media can flow");
+        } else if (pc.iceConnectionState === "failed") {
+          console.error("❌ ICE connection failed");
+        }
+      };
+
+      // Log signaling state changes
+      pc.onsignalingstatechange = () => {
+        console.log("📡 Signaling state changed:", pc.signalingState);
+        if (pc.signalingState === "stable") {
+          console.log("✅ Signaling stable - SDP negotiation complete");
+        }
+      };
+    }
+
+    async function startWebRTC() {
+      console.log("=== STARTING BROWSER WEBRTC ===");
+      console.log("Function called from:", new Error().stack);
+      
+      pc = new RTCPeerConnection({
+        iceServers: [{ urls: "stun:stun.relay.metered.ca:80" }],
+      });
+
+      // Add audio transceiver for bidirectional audio BEFORE getting user media
+      pc.addTransceiver("audio", { direction: "sendrecv" });
+      console.log("✅ Added audio transceiver with sendrecv direction");
+
+      // Set up all event handlers
+      setupPeerConnectionHandlers();
+
+      try {
+        console.log("🎤 Getting user media...");
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        console.log("✅ User media obtained. Track count:", stream.getTracks().length);
+        
+        stream.getTracks().forEach(track => {
+          console.log("Adding track to peer connection:", track.kind);
+          console.log("Track enabled:", track.enabled);
+          console.log("Track readyState:", track.readyState);
+          console.log("Track ID:", track.id);
+          pc.addTrack(track, stream);
+        });
+
+        // Monitor track states
+        stream.getTracks().forEach(track => {
+          track.onended = () => console.log("Track ended:", track.kind);
+          track.onmute = () => console.log("Track muted:", track.kind);
+          track.onunmute = () => console.log("Track unmuted:", track.kind);
+          
+          // Monitor track data
+          if (track.kind === 'audio') {
+            console.log("🎤 Audio track details:");
+            console.log("- Track ID:", track.id);
+            console.log("- Track enabled:", track.enabled);
+            console.log("- Track readyState:", track.readyState);
+            console.log("- Track muted:", track.muted);
+            console.log("- Track settings:", track.getSettings());
+            
+            // Set up audio level monitoring for outgoing audio
+            const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            const analyser = audioContext.createAnalyser();
+            const source = audioContext.createMediaStreamSource(stream);
+            source.connect(analyser);
+            
+            const dataArray = new Uint8Array(analyser.frequencyBinCount);
+            
+            const checkOutgoingAudioLevel = () => {
+              analyser.getByteFrequencyData(dataArray);
+              const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
+              console.log("🎤 Outgoing audio level:", average);
+              
+              if (average > 0) {
+                console.log("✅ Outgoing audio data is flowing!");
+              }
+            };
+            
+            // Check outgoing audio level every 3 seconds
+            const outgoingAudioCheckInterval = setInterval(checkOutgoingAudioLevel, 3000);
+            
+            // Stop checking after 15 seconds
+            setTimeout(() => {
+              clearInterval(outgoingAudioCheckInterval);
+              console.log("🔚 Stopped outgoing audio level monitoring");
+            }, 15000);
+          }
+        });
+
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        
+        console.log("=== BROWSER SDP OFFER GENERATED ===");
+        console.log("SDP Type: offer");
+        console.log("SDP Length:", offer.sdp.length, "characters");
+        console.log("SDP Content:");
+        console.log("----------------------------------------");
+        console.log(offer.sdp);
+        console.log("----------------------------------------");
+        
+        // Parse and log SDP details
+        const sdpLines = offer.sdp.split('\r\n');
+        console.log("SDP Analysis:");
+        console.log("- Total lines:", sdpLines.length);
+        console.log("- Media sections:", sdpLines.filter(line => line.startsWith('m=')).length);
+        console.log("- ICE candidates:", sdpLines.filter(line => line.startsWith('a=candidate:')).length);
+        console.log("- Codecs:", sdpLines.filter(line => line.startsWith('a=rtpmap:')).map(line => line.split(' ')[1]));
+        console.log("=== END BROWSER SDP OFFER ===\n");
+        
+        socket.emit("browser-offer", offer.sdp);
+        console.log("Browser SDP offer sent to server");
+        
+      } catch (error) {
+        console.error("❌ Error getting user media:", error);
+        console.error("Error details:", error.message);
+        console.error("Stack trace:", error.stack);
+      }
+    }
+  </script>
+</body>
+</html>

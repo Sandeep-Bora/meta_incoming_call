@@ -4,6 +4,9 @@ const axios = require("axios");
 const path = require("path");
 const http = require("http");
 const socketIO = require("socket.io");
+const fs = require("fs");
+
+// WebRTC imports
 const {
     RTCPeerConnection,
     RTCSessionDescription,
@@ -12,58 +15,839 @@ const {
 } = require("wrtc");
 
 // STUN server allows each peer to discover its public IP for NAT traversal
-const ICE_SERVERS = [{ urls: "stun:stun.relay.metered.ca:80" }];
+const ICE_SERVERS = [
+    { urls: "stun:stun.l.google.com:19302" },
+  {
+    urls: [
+      "turn:global.relay.metered.ca:80",
+      "turn:global.relay.metered.ca:443",
+      "turn:global.relay.metered.ca:3478",
+    ],
+    username: "37e1df1e0831b85f190394fc",
+    credential: "ifbScPfPyTAJhEJJ"
+  },
+];
 
-const WHATSAPP_API_URL = `https://graph.facebook.com/v18.0/${process.env.PHONE_NUMBER_ID}/calls`;
+// Production Configuration
+const CONFIG = {
+    PORT: process.env.PORT || 3000,
+    LOG_LEVEL: process.env.LOG_LEVEL || 'INFO',
+    MAX_RECORDING_DURATION: parseInt(process.env.MAX_RECORDING_DURATION) || 300000, // 5 minutes
+    MAX_AUDIO_CHUNKS: parseInt(process.env.MAX_AUDIO_CHUNKS) || 10000,
+    CLEANUP_INTERVAL: parseInt(process.env.CLEANUP_INTERVAL) || 300000, // 5 minutes
+    WHATSAPP_API_TIMEOUT: parseInt(process.env.WHATSAPP_API_TIMEOUT) || 30000, // 30 seconds
+    WEBRTC_TIMEOUT: parseInt(process.env.WEBRTC_TIMEOUT) || 10000, // 10 seconds
+    ALLOWED_ORIGINS: process.env.ALLOWED_ORIGINS || "*"
+};
+
+const WHATSAPP_API_URL = `https://graph.facebook.com/v23.0/${process.env.PHONE_NUMBER_ID}/calls`;
 const ACCESS_TOKEN = `Bearer ${process.env.ACCESS_TOKEN}`;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "sandeep_bora";
 
+// Enhanced Logging System
+const LOG_LEVELS = {
+    DEBUG: 0,
+    INFO: 1,
+    WARN: 2,
+    ERROR: 3
+};
+
+const CURRENT_LOG_LEVEL = LOG_LEVELS[CONFIG.LOG_LEVEL] || LOG_LEVELS.INFO;
+
+// Generate correlation ID for request tracking
+function generateCorrelationId() {
+    return Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+}
+
+// Enhanced structured logging with correlation IDs
+function log(level, message, meta = {}) {
+    if (level >= CURRENT_LOG_LEVEL) {
+        const timestamp = new Date().toISOString();
+        const levelName = Object.keys(LOG_LEVELS)[level];
+        const correlationId = meta.correlationId || 'system';
+        const callId = meta.callId || 'none';
+        
+        const logEntry = {
+            timestamp,
+            level: levelName,
+            message,
+            correlationId,
+            callId,
+            ...meta
+        };
+        
+        const logString = `[${timestamp}] [${levelName}] [${correlationId}] [${callId}] ${message} ${Object.keys(meta).length > 0 ? JSON.stringify(meta) : ''}\n`;
+        console.log(logString.trim());
+        
+        try {
+            fs.appendFileSync(path.join(__dirname, 'logs', 'incoming_call.log'), logString);
+        } catch (error) {
+            console.error('Failed to write to log file:', error.message);
+        }
+    }
+}
+
+// Ensure required directories exist
+const requiredDirs = ['logs', 'call-recordings', 'temp'];
+requiredDirs.forEach(dir => {
+    const dirPath = path.join(__dirname, dir);
+    if (!fs.existsSync(dirPath)) {
+        try {
+            fs.mkdirSync(dirPath, { recursive: true });
+            log(LOG_LEVELS.INFO, `Created directory: ${dir}`, { directory: dir });
+        } catch (error) {
+            log(LOG_LEVELS.ERROR, `Failed to create directory: ${dir}`, { directory: dir, error: error.message });
+            process.exit(1);
+        }
+    }
+});
+
+// Validate required environment variables
+const requiredEnvVars = ['PHONE_NUMBER_ID', 'ACCESS_TOKEN', 'VERIFY_TOKEN'];
+const missingEnvVars = requiredEnvVars.filter(envVar => !process.env[envVar]);
+if (missingEnvVars.length > 0) {
+    log(LOG_LEVELS.ERROR, 'Missing required environment variables', { missing: missingEnvVars });
+    process.exit(1);
+}
+
 const app = express();
 const server = http.createServer(app);
-const io = socketIO(server);
+const io = socketIO(server, {
+    cors: {
+        origin: CONFIG.ALLOWED_ORIGINS === "*" ? "*" : CONFIG.ALLOWED_ORIGINS.split(','),
+        methods: ["GET", "POST"]
+    },
+    transports: ['websocket', 'polling'],
+    pingTimeout: 60000,
+    pingInterval: 25000
+});
 
-app.use(express.json());
-app.use(express.static(path.join(__dirname, "public")));
+// Production Middleware
+// Note: Uncomment these when production dependencies are installed
+// app.use(helmet({
+//     contentSecurityPolicy: {
+//         directives: {
+//             defaultSrc: ["'self'"],
+//             scriptSrc: ["'self'", "'unsafe-inline'"],
+//             styleSrc: ["'self'", "'unsafe-inline'"],
+//             imgSrc: ["'self'", "data:", "https:"],
+//             connectSrc: ["'self'", "wss:", "ws:"]
+//         }
+//     }
+// }));
+// app.use(compression());
 
-// State variables per call session
+// Request logging middleware
+app.use((req, res, next) => {
+    const correlationId = generateCorrelationId();
+    req.correlationId = correlationId;
+    res.setHeader('X-Correlation-ID', correlationId);
+    
+    const startTime = Date.now();
+    res.on('finish', () => {
+        const duration = Date.now() - startTime;
+        log(LOG_LEVELS.INFO, `${req.method} ${req.path}`, {
+            correlationId,
+            method: req.method,
+            path: req.path,
+            statusCode: res.statusCode,
+            duration: `${duration}ms`,
+            userAgent: req.get('User-Agent'),
+            ip: req.ip
+        });
+    });
+    
+    next();
+});
+
+// Body parsing with size limits
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(express.static(path.join(__dirname, "public"), {
+    maxAge: '1d',
+    etag: true
+}));
+
+// Global state management with cleanup tracking
+const globalState = {
+    browserPc: null,
+    browserStream: null,
+    whatsappPc: null,
+    whatsappStream: null,
+    browserOfferSdp: null,
+    whatsappOfferSdp: null,
+    browserSocket: null,
+    currentCallId: null,
+    callTerminated: false,
+    activeConnections: new Set(),
+    callSessions: new Map(),
+    lastCleanup: Date.now()
+};
+
+// Cleanup function to prevent memory leaks
+function cleanupResources() {
+    const now = Date.now();
+    const cleanupThreshold = 5 * 60 * 1000; // 5 minutes
+    
+    // Clean up old call sessions
+    for (const [callId, session] of globalState.callSessions.entries()) {
+        if (now - session.lastActivity > cleanupThreshold) {
+            log(LOG_LEVELS.INFO, 'Cleaning up old call session', { callId, lastActivity: session.lastActivity });
+            globalState.callSessions.delete(callId);
+        }
+    }
+    
+    globalState.lastCleanup = now;
+}
+
+// Periodic cleanup
+setInterval(cleanupResources, CONFIG.CLEANUP_INTERVAL);
+
+// Production-ready Audio Recording System
+class AudioRecorder {
+    constructor(callId, correlationId) {
+        this.callId = callId;
+        this.correlationId = correlationId;
+        this.audioChunks = [];
+        this.browserAudioChunks = [];
+        this.whatsappAudioChunks = [];
+        this.isRecording = false;
+        this.recordingStartTime = null;
+        this.recordingInterval = null;
+        this.audioTracks = new Map();
+        this.audioProcessors = new Map();
+        this.webrtcTracks = new Map();
+        this.realAudioData = {};
+        this.hasBrowserAudio = false;
+        this.hasWhatsAppAudio = false;
+        this.audioBridgeActive = false;
+        this.audioBridgeStartTime = null;
+        this.audioBridgeEndTime = null;
+        this.audioFormat = null;
+        this.maxChunksReached = false;
+        this.recordingDuration = 0;
+        this.createdAt = Date.now();
+        
+        log(LOG_LEVELS.INFO, 'Audio recording system initialized', {
+            callId,
+            correlationId,
+            maxDuration: CONFIG.MAX_RECORDING_DURATION,
+            maxChunks: CONFIG.MAX_AUDIO_CHUNKS
+        });
+    }
+
+    /**
+     * Create an empty WAV file when no audio is recorded
+     */
+    createEmptyWavFile() {
+        const dataSize = 0;
+        const header = Buffer.alloc(44);
+        
+        // RIFF header
+        header.write('RIFF', 0);
+        header.writeUInt32LE(36 + dataSize, 4);
+        header.write('WAVE', 8);
+        
+        // fmt chunk
+        header.write('fmt ', 12);
+        header.writeUInt32LE(16, 16);
+        header.writeUInt16LE(1, 20); // PCM format
+        header.writeUInt16LE(1, 22); // Mono
+        header.writeUInt32LE(8000, 24); // Sample rate
+        header.writeUInt32LE(16000, 28); // Byte rate
+        header.writeUInt16LE(2, 32); // Block align
+        header.writeUInt16LE(16, 34); // Bits per sample
+        
+        // data chunk
+        header.write('data', 36);
+        header.writeUInt32LE(dataSize, 40);
+        
+        return Buffer.concat([header, Buffer.alloc(0)]);
+    }
+
+    /**
+     * Start audio recording ONLY after WebRTC audio bridging is successful
+     */
+    startAudioRecordingAfterBridging() {
+        if (this.isRecording) {
+            log(LOG_LEVELS.WARN, 'Audio recording already active, skipping duplicate start');
+                return;
+            }
+            
+        log(LOG_LEVELS.INFO, '🎵 Starting audio recording AFTER successful WebRTC audio bridging');
+        
+        this.isRecording = true;
+        this.recordingStartTime = Date.now();
+        
+        log(LOG_LEVELS.INFO, '✅ Audio recording started after successful audio bridging');
+    }
+
+    /**
+     * End audio bridge and stop all recording
+     */
+    endAudioBridgeAndStopCapture() {
+        if (!this.audioBridgeActive) {
+            log(LOG_LEVELS.WARN, '⚠️ Audio bridge not active, nothing to stop');
+                    return;
+                }
+                
+        this.audioBridgeActive = false;
+        this.audioBridgeEndTime = Date.now();
+        
+        if (this.audioBridgeStartTime) {
+            const duration = Math.round((this.audioBridgeEndTime - this.audioBridgeStartTime) / 1000);
+            log(LOG_LEVELS.INFO, `📊 Audio bridge duration: ${duration} seconds`);
+        }
+
+        // Stop recording
+        this.stopRecording();
+        
+        // Emit stop signal to browser
+        try {
+            io.emit('stop-mic-capture');
+            log(LOG_LEVELS.INFO, '📤 Emitted stop-mic-capture to browser');
+        } catch (error) {
+            log(LOG_LEVELS.ERROR, 'Failed to emit stop-mic-capture:', error);
+        }
+        
+        // 🆕 CRITICAL: Don't clear audio data immediately - wait for final recording
+        // The browser will send final audio recording, then we'll clear the data
+        log(LOG_LEVELS.INFO, '⏳ Waiting for final audio recording before clearing data');
+        
+        log(LOG_LEVELS.INFO, '✅ Audio bridge ended - all recording stopped and resources cleaned up');
+    }
+
+    stopRecording() {
+        if (!this.isRecording) return null;
+        
+        log(LOG_LEVELS.INFO, 'Stopping audio recording');
+        this.isRecording = false;
+        
+        if (this.recordingInterval) {
+            clearInterval(this.recordingInterval);
+            this.recordingInterval = null;
+        }
+        
+        const recordingDuration = Date.now() - this.recordingStartTime;
+        log(LOG_LEVELS.INFO, `Recording duration: ${recordingDuration}ms`);
+        
+            return null;
+    }
+
+    clearAllAudioData() {
+        const chunkCount = this.browserAudioChunks.length + this.whatsappAudioChunks.length;
+        
+        this.audioChunks = [];
+        this.browserAudioChunks = [];
+        this.whatsappAudioChunks = [];
+        this.audioTracks.clear();
+        this.audioProcessors.clear();
+        this.webrtcTracks.clear();
+        this.realAudioData = {};
+        this.hasBrowserAudio = false;
+        this.hasWhatsAppAudio = false;
+        this.audioFormat = null;
+        
+        log(LOG_LEVELS.INFO, 'All audio data cleared and state reset', {
+            callId: this.callId,
+            correlationId: this.correlationId,
+            clearedChunks: chunkCount
+        });
+    }
+    
+    /**
+     * Check if recording has exceeded limits
+     */
+    checkLimits() {
+        const totalChunks = this.browserAudioChunks.length + this.whatsappAudioChunks.length;
+        
+        if (totalChunks > CONFIG.MAX_AUDIO_CHUNKS && !this.maxChunksReached) {
+            this.maxChunksReached = true;
+            log(LOG_LEVELS.WARN, 'Maximum audio chunks limit reached', {
+                callId: this.callId,
+                correlationId: this.correlationId,
+                totalChunks,
+                maxChunks: CONFIG.MAX_AUDIO_CHUNKS
+            });
+            return false;
+        }
+        
+        return true;
+    }
+}
+
+// Initialize audio recorder - will be created per call
+let audioRecorder = null;
+let audioRecorderCallId = null;
+
+// Global WebRTC variables
+let browserOfferSdp = null;
+let whatsappOfferSdp = null;
+let browserSocket = null;
 let browserPc = null;
 let browserStream = null;
 let whatsappPc = null;
 let whatsappStream = null;
-let browserOfferSdp = null;
-let whatsappOfferSdp = null;
-let browserSocket = null;
 let currentCallId = null;
+let callTerminated = false;
+
+// Health check endpoint
+app.get("/health", (req, res) => {
+    const health = {
+        status: "healthy",
+        timestamp: new Date().toISOString(),
+        uptime: process.uptime(),
+        memory: process.memoryUsage(),
+        activeConnections: globalState.activeConnections.size,
+        callSessions: globalState.callSessions.size,
+        lastCleanup: globalState.lastCleanup
+    };
+    
+    res.json(health);
+});
+
+// Metrics endpoint
+app.get("/metrics", (req, res) => {
+    const metrics = {
+        timestamp: new Date().toISOString(),
+        system: {
+            uptime: process.uptime(),
+            memory: process.memoryUsage(),
+            cpu: process.cpuUsage()
+        },
+        application: {
+            activeConnections: globalState.activeConnections.size,
+            callSessions: globalState.callSessions.size,
+            lastCleanup: globalState.lastCleanup,
+            currentCallId: globalState.currentCallId,
+            callTerminated: globalState.callTerminated
+        },
+        audio: {
+            audioRecorderActive: audioRecorder ? true : false,
+            audioRecorderCallId: audioRecorderCallId,
+            maxRecordingDuration: CONFIG.MAX_RECORDING_DURATION,
+            maxAudioChunks: CONFIG.MAX_AUDIO_CHUNKS
+        }
+    };
+    
+    res.json(metrics);
+});
+
+// Recordings API endpoint
+app.get("/api/recordings", (req, res) => {
+    try {
+        const recordingsDir = path.join(__dirname, 'call-recordings');
+        
+        if (!fs.existsSync(recordingsDir)) {
+            return res.json({ recordings: [] });
+        }
+        
+        const files = fs.readdirSync(recordingsDir);
+        const recordingsMap = new Map();
+        
+        files.forEach(file => {
+            if (file.endsWith('.wav') || file.endsWith('.mp3')) {
+                const filePath = path.join(recordingsDir, file);
+                const stats = fs.statSync(filePath);
+
+                // New filename format: <callId>-<timestamp>.wav or .mp3
+                // Example: 1234567890abcdef-2024-06-07T12-34-56-789Z.wav
+                const match = file.match(/^(.+?)-(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z)\.(wav|mp3)$/);
+                if (match) {
+                    const callId = match[1];
+                    const timestamp = match[2].replace(/-/g, ':').replace('T', ' ').replace(/:\d{3}Z$/, '');
+                    const format = match[3];
+                    
+                    if (!recordingsMap.has(callId)) {
+                        recordingsMap.set(callId, {
+                            callId: callId,
+                            timestamp: timestamp,
+                            created: stats.birthtime,
+                            modified: stats.mtime,
+                            files: {}
+                        });
+                    }
+                    
+                    const recording = recordingsMap.get(callId);
+                    recording.files[format] = {
+                        filename: file,
+                        format: format,
+                        size: stats.size,
+                        downloadUrl: `/api/recordings/download/${file}`,
+                        playUrl: `/api/recordings/play/${file}`
+                    };
+                    
+                    // Update created time to the earliest file
+                    if (new Date(stats.birthtime) < new Date(recording.created)) {
+                        recording.created = stats.birthtime;
+                    }
+                }
+            }
+        });
+        
+        // Convert map to array and sort by creation time (newest first)
+        const recordings = Array.from(recordingsMap.values()).sort((a, b) => new Date(b.created) - new Date(a.created));
+        
+        log(LOG_LEVELS.INFO, "Recordings list requested", {
+            correlationId: req.correlationId,
+            totalRecordings: recordings.length,
+            totalFiles: files.filter(f => f.endsWith('.wav') || f.endsWith('.mp3')).length
+        });
+        
+        res.json({ recordings });
+    } catch (error) {
+        log(LOG_LEVELS.ERROR, "Error fetching recordings list", {
+            correlationId: req.correlationId,
+            error: error.message
+        });
+        res.status(500).json({ error: "Failed to fetch recordings" });
+    }
+});
+
+// Download recording endpoint
+app.get("/api/recordings/download/:filename", (req, res) => {
+    try {
+        const filename = req.params.filename;
+        const filePath = path.join(__dirname, 'call-recordings', filename);
+        
+        if (!fs.existsSync(filePath)) {
+            return res.status(404).json({ error: "Recording not found" });
+        }
+        
+        log(LOG_LEVELS.INFO, "Recording download requested", {
+            correlationId: req.correlationId,
+            filename: filename
+        });
+        
+        res.download(filePath, filename);
+        } catch (error) {
+        log(LOG_LEVELS.ERROR, "Error downloading recording", {
+            correlationId: req.correlationId,
+            filename: req.params.filename,
+            error: error.message
+        });
+        res.status(500).json({ error: "Failed to download recording" });
+    }
+});
+
+// Play recording endpoint (stream audio)
+app.get("/api/recordings/play/:filename", (req, res) => {
+    try {
+        const filename = req.params.filename;
+        const filePath = path.join(__dirname, 'call-recordings', filename);
+        
+        if (!fs.existsSync(filePath)) {
+            return res.status(404).json({ error: "Recording not found" });
+        }
+        
+        const stat = fs.statSync(filePath);
+        const fileSize = stat.size;
+        const range = req.headers.range;
+        
+        if (range) {
+            // Handle range requests for audio streaming
+            const parts = range.replace(/bytes=/, "").split("-");
+            const start = parseInt(parts[0], 10);
+            const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+            const chunksize = (end - start) + 1;
+            const file = fs.createReadStream(filePath, { start, end });
+            const head = {
+                'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+                'Accept-Ranges': 'bytes',
+                'Content-Length': chunksize,
+                'Content-Type': filename.endsWith('.mp3') ? 'audio/mpeg' : 'audio/wav',
+            };
+            res.writeHead(206, head);
+            file.pipe(res);
+        } else {
+            // Serve entire file
+            const head = {
+                'Content-Length': fileSize,
+                'Content-Type': filename.endsWith('.mp3') ? 'audio/mpeg' : 'audio/wav',
+            };
+            res.writeHead(200, head);
+            fs.createReadStream(filePath).pipe(res);
+        }
+        
+        log(LOG_LEVELS.INFO, "Recording stream requested", {
+            correlationId: req.correlationId,
+            filename: filename,
+            hasRange: !!range
+        });
+        } catch (error) {
+        log(LOG_LEVELS.ERROR, "Error streaming recording", {
+            correlationId: req.correlationId,
+            filename: req.params.filename,
+            error: error.message
+        });
+        res.status(500).json({ error: "Failed to stream recording" });
+    }
+});
 
 /**
  * Webhook verification endpoint for WhatsApp Business API
- * This endpoint is called by WhatsApp to verify your webhook URL
  */
 app.get("/webhook", (req, res) => {
     const mode = req.query["hub.mode"];
     const token = req.query["hub.verify_token"];
     const challenge = req.query["hub.challenge"];
 
-    console.log("Webhook verification request received:");
-    console.log("Mode:", mode);
-    console.log("Token:", token);
-    console.log("Challenge:", challenge);
+    log(LOG_LEVELS.INFO, "Call webhook verification request received", {
+        mode: mode,
+        token: token ? "***" : "none",
+        challenge: challenge ? "***" : "none"
+    });
 
-    // Check if a token and mode were sent
     if (mode && token) {
-        // Check the mode and token sent are correct
         if (mode === "subscribe" && token === VERIFY_TOKEN) {
-            // Respond with 200 OK and challenge token from the request
-            console.log("Webhook verified successfully!");
+            log(LOG_LEVELS.INFO, "Call webhook verified successfully!");
             res.status(200).send(challenge);
         } else {
-            // Responds with '403 Forbidden' if verify tokens do not match
-            console.log("Webhook verification failed - invalid token");
+            log(LOG_LEVELS.WARN, "Call webhook verification failed - invalid token");
             res.sendStatus(403);
         }
     } else {
-        console.log("Webhook verification failed - missing parameters");
+        log(LOG_LEVELS.WARN, "Call webhook verification failed - missing parameters");
         res.sendStatus(400);
+    }
+});
+
+/**
+ * Handles incoming WhatsApp webhook call events.
+ */
+app.post("/webhook", async (req, res) => {
+    const correlationId = req.correlationId || generateCorrelationId();
+    
+    try {
+        const entry = req.body?.entry?.[0];
+        const change = entry?.changes?.[0];
+        
+        // Only log call-related webhooks, filter out message webhooks
+        const isCallWebhook = change?.field === 'calls' || 
+                             change?.value?.calls?.length > 0 ||
+                             change?.value?.statuses?.some(status => status.id);
+        
+        if (isCallWebhook) {
+            log(LOG_LEVELS.INFO, "Received CALL webhook POST request", {
+                correlationId,
+                bodySize: JSON.stringify(req.body).length,
+                hasEntry: !!req.body?.entry,
+                hasChanges: !!req.body?.entry?.[0]?.changes,
+                field: change?.field,
+                hasCalls: !!change?.value?.calls?.length,
+                hasStatuses: !!change?.value?.statuses?.length
+            });
+        } else {
+            // Silently handle non-call webhooks (messages, etc.) without logging
+            return res.sendStatus(200);
+        }
+        
+        // Handle WhatsApp 'calls' webhook statuses
+        if (change?.field === 'calls') {
+            const statuses = change?.value?.statuses;
+            if (Array.isArray(statuses) && statuses.length > 0) {
+                const statusItem = statuses[0];
+                const waCallId = statusItem?.id;
+                const statusLower = (statusItem?.status || '').toLowerCase();
+                currentCallId = waCallId || currentCallId;
+                console.log(`🎵 Calls status webhook: id=${waCallId}, status=${statusItem?.status}`);
+                
+                // Try to extract WhatsApp offer SDP (if provided)
+                const possibleSdp = statusItem?.session?.sdp || change?.value?.session?.sdp;
+                if (possibleSdp) {
+                    whatsappOfferSdp = possibleSdp;
+                    log(LOG_LEVELS.INFO, '🎵 WhatsApp offer SDP received from calls.status webhook');
+                }
+                
+                if (statusLower === 'accepted') {
+                    console.log(`🎵 WhatsApp call ACCEPTED. Call ID: ${waCallId} - Starting audio recording`);
+                    
+                    // 🆕 CRITICAL: Start audio recording ONLY when call is accepted (not when bridge is established)
+                    if (audioRecorder) {
+                        audioRecorder.audioBridgeActive = true;
+                        audioRecorder.audioBridgeStartTime = Date.now();
+                        audioRecorder.startAudioRecordingAfterBridging();
+                        log(LOG_LEVELS.INFO, '📞 Audio recording started - call accepted');
+                    } else {
+                        log(LOG_LEVELS.WARN, '⚠️ No AudioRecorder instance available for accepted call');
+                    }
+                    
+                    // 🆕 CRITICAL: Request browser to start mic capture when call is accepted
+                    if (browserSocket) {
+                        try {
+                            browserSocket.emit('start-mic-capture', {
+                                audio: {
+                                    echoCancellation: true,
+                                    noiseSuppression: true,
+                                    autoGainControl: true,
+                                    sampleRate: 8000,
+                                    channelCount: 1
+                                },
+                                timesliceMs: 250 // small chunks
+                            });
+                            log(LOG_LEVELS.INFO, '📞 Requested browser to start mic capture - call accepted');
+        } catch (error) {
+                            log(LOG_LEVELS.ERROR, 'Failed to request browser mic capture:', error);
+                        }
+                    }
+                    
+                    // Emit call accepted to browser
+                    io.emit("call-is-coming", { 
+                        callId: waCallId, 
+                        callerName: "WhatsApp User", 
+                        callerNumber: statusItem?.recipient_id || "Unknown" 
+                    });
+                    
+                    // Attempt to initiate bridge if we have both SDPs and a browser socket
+                    await initiateWebRTCBridge();
+                    return res.sendStatus(200);
+                }
+                
+                if (statusLower === 'ringing') {
+                    console.log(`🎵 WhatsApp call RINGING. Call ID: ${waCallId}`);
+                    
+                    // No need to create AudioRecorder here - it will be created when call connects
+                    return res.sendStatus(200);
+                }
+                
+                if (statusLower === 'rejected' || statusLower === 'terminated') {
+                    console.log(`🎵 WhatsApp call ${statusLower.toUpperCase()}. Call ID: ${waCallId} - Stopping audio recording`);
+                    io.emit("call-ended");
+                    
+                    if (audioRecorder && audioRecorder.audioBridgeActive) {
+                        audioRecorder.endAudioBridgeAndStopCapture();
+                    }
+                    return res.sendStatus(200);
+                }
+            }
+            console.warn('Calls webhook received but no actionable statuses found in statuses array. Falling through to handle calls events.');
+        }
+        
+        const call = change?.value?.calls?.[0];
+        const contact = change?.value?.contacts?.[0];
+
+        if (!call || !call.id || !call.event) {
+            console.warn("Received invalid or incomplete call event.");
+            return res.sendStatus(200);
+        }
+
+        const callId = call.id;
+        
+        if (call.event === "connect") {
+            whatsappOfferSdp = call?.session?.sdp;
+            const callerName = contact?.profile?.name || "Unknown";
+            const callerNumber = contact?.wa_id || "Unknown";
+
+            console.log(`Incoming WhatsApp call from ${callerName} (${callerNumber})`);
+            io.emit("call-is-coming", { callId, callerName, callerNumber });
+            
+            // Reset call terminated flag for new call
+            callTerminated = false;
+
+            // 🆕 CRITICAL: Create a NEW AudioRecorder instance ONLY for new calls
+            // Check if this is a new call by comparing with the call ID the AudioRecorder was created for
+            if (!audioRecorder || audioRecorderCallId !== callId) {
+                audioRecorder = new AudioRecorder(callId, correlationId);
+                audioRecorderCallId = callId;
+                log(LOG_LEVELS.INFO, `Created NEW AudioRecorder instance for call: ${callId}`);
+            } else {
+                log(LOG_LEVELS.INFO, `Reusing existing AudioRecorder instance for call: ${callId}`);
+            }
+            
+            // Update current call ID
+            currentCallId = callId;
+            
+            // IMPORTANT: Do not start recording yet. Recording will start after WebRTC audio bridge is confirmed.
+            log(LOG_LEVELS.INFO, "Recording will start after audio bridge confirmation");
+
+            // Only initiate bridge if we have browser SDP offer
+            if (browserOfferSdp) {
+                await initiateWebRTCBridge();
+            } else {
+                log(LOG_LEVELS.INFO, "Waiting for browser SDP offer before initiating WebRTC bridge");
+            }
+
+        } else if (call.event === "terminate") {
+            console.log(`WhatsApp call terminated. Call ID: ${callId}`);
+            io.emit("call-ended");
+            
+            // Set call terminated flag
+            callTerminated = true;
+
+            if (call.duration && call.status) {
+                console.log(`Call duration: ${call.duration}s | Status: ${call.status}`);
+            }
+
+            // 🆕 CRITICAL: Stop audio recording immediately when call terminates
+            if (audioRecorder && audioRecorder.audioBridgeActive) {
+                // Force immediate stop - don't wait for browser
+                audioRecorder.audioBridgeActive = false;
+                audioRecorder.stopRecording();
+                log(LOG_LEVELS.INFO, "📞 Audio recording stopped immediately - call terminated");
+                
+                // Emit stop signal to browser immediately
+                try {
+                    io.emit('stop-mic-capture');
+                    log(LOG_LEVELS.INFO, '📤 Emitted stop-mic-capture to browser immediately');
+        } catch (error) {
+                    log(LOG_LEVELS.ERROR, 'Failed to emit stop-mic-capture:', error);
+                }
+                
+                // 🆕 CRITICAL: Don't clear audio data immediately - wait for final recording
+                // The final recording contains the actual conversation and needs the accumulated chunks
+                log(LOG_LEVELS.INFO, '⏳ Preserving audio data for final recording processing');
+                
+            } else if (audioRecorder && audioRecorder.isRecording) {
+                audioRecorder.stopRecording();
+                log(LOG_LEVELS.INFO, "Audio recording stopped, waiting for final browser audio");
+            }
+
+        } else if (call.event === "accept") {
+            console.log(`WhatsApp call accepted. Call ID: ${callId}`);
+            
+            // 🆕 CRITICAL: Start audio recording when call is accepted via event
+            if (audioRecorder) {
+                audioRecorder.audioBridgeActive = true;
+                audioRecorder.audioBridgeStartTime = Date.now();
+                audioRecorder.startAudioRecordingAfterBridging();
+                log(LOG_LEVELS.INFO, '📞 Audio recording started - call accepted via event');
+            } else {
+                log(LOG_LEVELS.WARN, '⚠️ No AudioRecorder instance available for accept event');
+            }
+            
+            // Request browser to start mic capture
+            if (browserSocket) {
+                try {
+                    browserSocket.emit('start-mic-capture', {
+                        audio: {
+                            echoCancellation: true,
+                            noiseSuppression: true,
+                            autoGainControl: true,
+                            sampleRate: 8000,
+                            channelCount: 1
+                        },
+                        timesliceMs: 250
+                    });
+                    log(LOG_LEVELS.INFO, '📞 Requested browser to start mic capture - call accepted via event');
+        } catch (error) {
+                    log(LOG_LEVELS.ERROR, 'Failed to request browser mic capture:', error);
+                }
+            }
+            
+        } else {
+            console.log(`Unhandled WhatsApp call event: ${call.event}`);
+        }
+        
+        res.sendStatus(200);
+    } catch (error) {
+        log(LOG_LEVELS.ERROR, 'Webhook error:', {
+            correlationId,
+            error: error.message,
+            stack: error.stack,
+            body: req.body
+        });
+        console.error('Webhook error details:', error);
+        res.sendStatus(500);
     }
 });
 
@@ -71,7 +855,34 @@ app.get("/webhook", (req, res) => {
  * Socket.IO connection from browser client.
  */
 io.on("connection", (socket) => {
-    console.log(`Socket.IO connection established with browser: ${socket.id}`);
+    const correlationId = generateCorrelationId();
+    socket.correlationId = correlationId;
+    
+    log(LOG_LEVELS.INFO, "Socket.IO connection established", {
+        correlationId,
+        socketId: socket.id,
+        clientIP: socket.handshake.address,
+        userAgent: socket.handshake.headers['user-agent']
+    });
+    
+    // Track active connections
+    globalState.activeConnections.add(socket.id);
+    
+    // Handle disconnection
+    socket.on("disconnect", (reason) => {
+        log(LOG_LEVELS.INFO, "Socket.IO connection disconnected", {
+            correlationId,
+            socketId: socket.id,
+            reason
+        });
+        
+        globalState.activeConnections.delete(socket.id);
+        
+        // Clean up any associated call session
+        if (socket.callId) {
+            globalState.callSessions.delete(socket.callId);
+        }
+    });
 
     // SDP offer from browser
     socket.on("browser-offer", async (sdp) => {
@@ -106,55 +917,216 @@ io.on("connection", (socket) => {
         const result = await terminateCall(callId);
         console.log("Terminate call response:", result);
     });
-});
 
-/**
- * Handles incoming WhatsApp webhook call events.
- */
-app.post("/webhook", async (req, res) => {
-    try {
-        console.log("Received webhook POST request:", JSON.stringify(req.body, null, 2));
-        
-        const entry = req.body?.entry?.[0];
-        const change = entry?.changes?.[0];
-        const call = change?.value?.calls?.[0];
-        const contact = change?.value?.contacts?.[0];
-
-        if (!call || !call.id || !call.event) {
-            console.warn("Received invalid or incomplete call event.");
-            return res.sendStatus(200);
-        }
-
-        const callId = call.id;
-        currentCallId = callId;
-
-        if (call.event === "connect") {
-            whatsappOfferSdp = call?.session?.sdp;
-            const callerName = contact?.profile?.name || "Unknown";
-            const callerNumber = contact?.wa_id || "Unknown";
-
-            console.log(`Incoming WhatsApp call from ${callerName} (${callerNumber})`);
-            io.emit("call-is-coming", { callId, callerName, callerNumber });
-
-            await initiateWebRTCBridge();
-
-        } else if (call.event === "terminate") {
-            console.log(`WhatsApp call terminated. Call ID: ${callId}`);
-            io.emit("call-ended");
-
-            if (call.duration && call.status) {
-                console.log(`Call duration: ${call.duration}s | Status: ${call.status}`);
+    // Real audio chunk from browser
+    socket.on("real-audio-chunk", (data) => {
+        try {
+            // 🆕 CRITICAL: Ignore audio chunks after call termination
+            if (globalState.callTerminated) {
+                log(LOG_LEVELS.WARN, "Ignoring audio chunk - call already terminated", {
+                    correlationId: socket.correlationId,
+                    callId: data.callId
+                });
+                return;
             }
-
-        } else {
-            console.log(`Unhandled WhatsApp call event: ${call.event}`);
+            
+            if (audioRecorder && audioRecorder.isRecording) {
+                // Check limits before processing
+                if (!audioRecorder.checkLimits()) {
+                    log(LOG_LEVELS.WARN, "Audio chunk limit reached, stopping recording", {
+                        correlationId: socket.correlationId,
+                        callId: audioRecorder.callId
+                    });
+                    audioRecorder.stopRecording();
+                    return;
+                }
+                
+                // 🆕 CRITICAL: Store audio format information for proper WAV creation
+                if (!audioRecorder.audioFormat) {
+                    audioRecorder.audioFormat = {
+                        sampleRate: data.sampleRate || 44100,
+                        channels: data.channels || 1,
+                        type: data.type || 'pcm'
+                    };
+                    log(LOG_LEVELS.INFO, "Audio format detected", {
+                        correlationId: socket.correlationId,
+                        callId: audioRecorder.callId,
+                        sampleRate: audioRecorder.audioFormat.sampleRate,
+                        channels: audioRecorder.audioFormat.channels,
+                        type: audioRecorder.audioFormat.type
+                    });
+                }
+                
+                audioRecorder.browserAudioChunks.push(Buffer.from(data.audioData, 'base64'));
+                audioRecorder.hasBrowserAudio = true;
+                
+                // Log only occasionally to reduce noise
+                if (audioRecorder.browserAudioChunks.length % 50 === 0) {
+                    log(LOG_LEVELS.INFO, "Received real audio chunk", {
+                        correlationId: socket.correlationId,
+                        callId: audioRecorder.callId,
+                        chunkSize: data.size,
+                        totalChunks: audioRecorder.browserAudioChunks.length
+                    });
+                }
+            } else {
+                log(LOG_LEVELS.WARN, "Audio recorder not available or not recording", {
+                    correlationId: socket.correlationId,
+                    callId: data.callId,
+                    hasRecorder: !!audioRecorder,
+                    isRecording: audioRecorder?.isRecording
+                });
+            }
+        } catch (error) {
+            log(LOG_LEVELS.ERROR, "Error processing real audio chunk", {
+                correlationId: socket.correlationId,
+                callId: data.callId,
+                error: error.message
+            });
         }
+    });
 
-        res.sendStatus(200);
-    } catch (err) {
-        console.error("Error processing /webhook POST:", err);
-        res.sendStatus(500);
-    }
+    // Final audio recording from browser
+    socket.on("final-audio-recording", (data) => {
+        try {
+            // 🆕 CRITICAL: Allow final recording even after call termination (it contains the actual conversation)
+            if (callTerminated) {
+                log(LOG_LEVELS.INFO, `📥 Processing final audio recording after call termination - this contains the actual conversation`);
+            }
+            
+            log(LOG_LEVELS.INFO, `📥 Received final audio recording: ${data.totalSize} bytes, duration: ${data.duration}s`);
+            
+            // Prevent duplicate recordings - check if we already saved this call
+            const callId = data.callId;
+            if (socket.recordingSaved) {
+                log(LOG_LEVELS.WARN, `⚠️ Recording already saved for call ${callId}, ignoring duplicate`);
+                return;
+            }
+            
+            // Handle final audio even if recording was recently stopped
+            if (audioRecorder) {
+                let wavFile = null;
+                
+                // 🆕 CRITICAL: Use real-time chunks instead of final recording to avoid "mic on" sound
+                if (audioRecorder.browserAudioChunks.length > 0) {
+                    log(LOG_LEVELS.INFO, `🎵 Using ${audioRecorder.browserAudioChunks.length} real-time audio chunks instead of final recording`);
+                    
+                    // Create WAV file from real-time chunks (these contain actual conversation)
+                    wavFile = createSimpleWavFile(audioRecorder.browserAudioChunks, audioRecorder.audioFormat);
+                } else {
+                    // Fallback: use final recording if no real-time chunks available
+                    log(LOG_LEVELS.INFO, `🎵 No real-time chunks available, using final recording: ${data.audioData?.length || 0} base64 chars`);
+                
+                // Temporarily allow adding audio chunks
+                const wasRecording = audioRecorder.isRecording;
+                audioRecorder.isRecording = true;
+                    audioRecorder.browserAudioChunks.push(Buffer.from(data.audioData, 'base64'));
+                audioRecorder.isRecording = wasRecording;
+                
+                    // Create simple WAV file with final recording
+                    wavFile = createSimpleWavFile(audioRecorder.browserAudioChunks, audioRecorder.audioFormat);
+                }
+                if (wavFile) {
+                    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+                    const filename = `${callId}-${timestamp}.wav`;
+                    const filepath = path.join(__dirname, 'call-recordings', filename);
+                    
+                                            try {
+                            fs.writeFileSync(filepath, wavFile);
+                            
+                            // Also create MP3 version for better compatibility
+                            const mp3Filename = filename.replace('.wav', '.mp3');
+                            const mp3Filepath = path.join(__dirname, 'call-recordings', mp3Filename);
+                            
+                            try {
+                                // Convert WAV to MP3 using ffmpeg
+                                const { execSync } = require('child_process');
+                                execSync(`ffmpeg -i "${filepath}" -codec:a libmp3lame -b:a 40k -ar 8000 -ac 2 "${mp3Filepath}" -y`, { stdio: 'ignore' });
+                                log(LOG_LEVELS.INFO, `🎵 MP3 version created: ${mp3Filename}`);
+                            } catch (ffmpegError) {
+                                log(LOG_LEVELS.WARN, `Could not create MP3 version: ${ffmpegError.message}`);
+                            }
+                            
+                            // Mark this recording as saved to prevent duplicates
+                            socket.recordingSaved = true;
+                            
+                            log(LOG_LEVELS.INFO, `🎵 Conversation recording saved: ${filename}`, { 
+                                filepath, 
+                                fileSize: wavFile.length,
+                                duration: `${data.duration}s`,
+                                totalSize: data.totalSize,
+                            browserChunks: audioRecorder.browserAudioChunks.length
+                            });
+                            console.log(`✅ Recording saved successfully: ${filename}`);
+                        console.log(`📊 Audio sources - Browser: ${audioRecorder.browserAudioChunks.length} chunks`);
+                            
+                            // Clean up to prevent memory leaks
+                            setTimeout(() => {
+                                if (socket.recordingSaved) {
+                                    delete socket.recordingSaved;
+                                }
+                            }, 5000);
+                            
+                        } catch (error) {
+                            log(LOG_LEVELS.ERROR, "❌ Failed to save conversation recording", error);
+                        }
+                } else {
+                    log(LOG_LEVELS.WARN, "❌ No WAV file generated from recording");
+                }
+                
+                // 🆕 CRITICAL: Clear audio data AFTER final recording is processed
+                if (audioRecorder) {
+                    audioRecorder.clearAllAudioData();
+                    log(LOG_LEVELS.INFO, '🧹 Cleared all audio data after final recording');
+                }
+                
+            } else {
+                log(LOG_LEVELS.WARN, `❌ Audio recorder not available`);
+            }
+        } catch (error) {
+            log(LOG_LEVELS.ERROR, "Error processing final audio recording:", error);
+            console.error("❌ Error processing final audio recording:", error);
+        }
+    });
+
+    // Accept call from browser
+    socket.on("accept-call", async (callId) => {
+        try {
+            const result = await acceptCall(callId);
+            log(LOG_LEVELS.INFO, `Call accepted: ${callId}`);
+            console.log("Accept call response:", result);
+            
+            // 🆕 CRITICAL: Start audio recording when call is accepted from browser
+            if (audioRecorder) {
+                audioRecorder.audioBridgeActive = true;
+                audioRecorder.audioBridgeStartTime = Date.now();
+                audioRecorder.startAudioRecordingAfterBridging();
+                log(LOG_LEVELS.INFO, '📞 Audio recording started - call accepted from browser');
+            } else {
+                log(LOG_LEVELS.WARN, '⚠️ No AudioRecorder instance available for browser accept');
+            }
+            
+            // Request browser to start mic capture
+            try {
+                socket.emit('start-mic-capture', {
+                    audio: {
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: true,
+                        sampleRate: 8000,
+                        channelCount: 1
+                    },
+                    timesliceMs: 250
+                });
+                log(LOG_LEVELS.INFO, '📞 Requested browser to start mic capture - call accepted from browser');
+            } catch (error) {
+                log(LOG_LEVELS.ERROR, 'Failed to request browser mic capture:', error);
+            }
+            
+        } catch (error) {
+            log(LOG_LEVELS.ERROR, "Error accepting call:", error);
+        }
+    });
 });
 
 /**
@@ -163,40 +1135,31 @@ app.post("/webhook", async (req, res) => {
 async function initiateWebRTCBridge() {
     if (!browserOfferSdp || !whatsappOfferSdp || !browserSocket) return;
 
-    // ✅ Replace with your actual Metered.ca TURN credentials
-    const ICE_SERVERS = [
-      {
-        urls: [
-          "turn:global.relay.metered.ca:80",
-          "turn:global.relay.metered.ca:443",
-          "turn:global.relay.metered.ca:3478",
-          "turn:global.relay.metered.ca:80?transport=tcp",
-          "turn:global.relay.metered.ca:443?transport=tcp",
-          "turns:global.relay.metered.ca:443?transport=tcp"
-        ],
-        username: "37e1df1e0831b85f190394fc",
-        credential: "ifbScPfPyTAJhEJJ"
-      }
-    ];
-
     // --- Setup browser peer connection ---
-    browserPc = new RTCPeerConnection({
-        iceServers: ICE_SERVERS,
-        iceTransportPolicy: 'relay' // 🚀 Force TURN usage
-    });
+    browserPc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
     browserStream = new MediaStream();
+
+    // Monitor WebRTC connection state to detect when bridge ends
+    browserPc.onconnectionstatechange = () => {
+        console.log(`🎵 Browser peer connection state: ${browserPc.connectionState}`);
+        if (browserPc.connectionState === 'failed' || browserPc.connectionState === 'disconnected' || browserPc.connectionState === 'closed') {
+            console.log('🛑 Browser WebRTC connection ended - stopping audio bridge');
+            if (audioRecorder) {
+                audioRecorder.endAudioBridgeAndStopCapture();
+            }
+        }
+    };
 
     browserPc.ontrack = (event) => {
         console.log("Audio track received from browser.");
-        event.streams[0].getTracks().forEach((track) => browserStream.addTrack(track));
+        event.streams[0].getTracks().forEach((track) => {
+            browserStream.addTrack(track);
+        });
     };
 
     browserPc.onicecandidate = (event) => {
         if (event.candidate) {
-            console.log("Browser ICE candidate:", event.candidate);
             browserSocket.emit("browser-candidate", event.candidate);
-        } else {
-            console.log("Browser ICE candidate gathering complete.");
         }
     };
 
@@ -207,10 +1170,18 @@ async function initiateWebRTCBridge() {
     console.log("Browser offer SDP set as remote description.");
 
     // --- Setup WhatsApp peer connection ---
-    whatsappPc = new RTCPeerConnection({
-        iceServers: ICE_SERVERS,
-        iceTransportPolicy: 'relay' // 🚀 Force TURN usage
-    });
+    whatsappPc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+
+    // Monitor WhatsApp WebRTC connection state to detect when bridge ends
+    whatsappPc.onconnectionstatechange = () => {
+        console.log(`🎵 WhatsApp peer connection state: ${whatsappPc.connectionState}`);
+        if (whatsappPc.connectionState === 'failed' || whatsappPc.connectionState === 'disconnected' || whatsappPc.connectionState === 'closed') {
+            console.log('🛑 WhatsApp WebRTC connection ended - stopping audio bridge');
+            if (audioRecorder) {
+                audioRecorder.endAudioBridgeAndStopCapture();
+            }
+        }
+    };
 
     const waTrackPromise = new Promise((resolve, reject) => {
         const timeout = setTimeout(() => reject("Timed out waiting for WhatsApp track"), 10000);
@@ -221,16 +1192,6 @@ async function initiateWebRTCBridge() {
             resolve();
         };
     });
-
-    whatsappPc.onicecandidate = (event) => {
-        if (event.candidate) {
-            console.log("WhatsApp ICE candidate:", event.candidate);
-            browserSocket.emit("whatsapp-candidate", event.candidate);
-        } else {
-            console.log("WhatsApp ICE candidate gathering complete.");
-        }
-    };
-
 
     await whatsappPc.setRemoteDescription(new RTCSessionDescription({
         type: "offer",
@@ -251,6 +1212,17 @@ async function initiateWebRTCBridge() {
     whatsappStream?.getAudioTracks().forEach((track) => {
         browserPc.addTrack(track, whatsappStream);
     });
+
+    // WebRTC audio bridging successfully established
+    console.log("🎵 WebRTC audio bridge established successfully - ready for audio capture");
+    
+    // 🆕 CRITICAL: Do NOT start recording here - recording will start when call is accepted
+    // The bridge is established but recording only starts when call is actually accepted
+    log(LOG_LEVELS.INFO, "🎵 WebRTC bridge ready - audio recording will start when call is accepted");
+
+    // 🆕 CRITICAL: Do NOT start mic capture here - it will start when call is accepted
+    // The browser mic capture will be requested when the call is actually accepted
+    log(LOG_LEVELS.INFO, '🎵 WebRTC bridge ready - browser mic capture will start when call is accepted');
 
     // --- Create SDP answers for both peers ---
     const browserAnswer = await browserPc.createAnswer();
@@ -299,26 +1271,40 @@ async function answerCallToWhatsApp(callId, sdp, action) {
                 Authorization: ACCESS_TOKEN,
                 "Content-Type": "application/json",
             },
+            timeout: CONFIG.WHATSAPP_API_TIMEOUT
         });
 
         const success = response.data?.success === true;
 
         if (success) {
-            console.log(`Successfully sent '${action}' to WhatsApp.`);
+            log(LOG_LEVELS.INFO, `Successfully sent '${action}' to WhatsApp`, {
+                callId,
+                action,
+                responseStatus: response.status
+            });
             return true;
         } else {
-            console.warn(`WhatsApp '${action}' response was not successful.`);
+            log(LOG_LEVELS.WARN, `WhatsApp '${action}' response was not successful`, {
+                callId,
+                action,
+                responseData: response.data
+            });
             return false;
         }
     } catch (error) {
-        console.error(`Failed to send '${action}' to WhatsApp:`, error.message);
+        log(LOG_LEVELS.ERROR, `Failed to send '${action}' to WhatsApp`, {
+            callId,
+            action,
+            error: error.message,
+            isTimeout: error.code === 'ECONNABORTED',
+            statusCode: error.response?.status
+        });
         return false;
     }
 }
 
 /**
  * Rejects the current WhatsApp call.
- * Returns WhatsApp API response.
  */
 async function rejectCall(callId) {
     const body = {
@@ -352,7 +1338,6 @@ async function rejectCall(callId) {
 
 /**
  * Terminate WhatsApp call.
- * Returns WhatsApp API response.
  */
  async function terminateCall(callId) {
     const body = {
@@ -384,8 +1369,139 @@ async function rejectCall(callId) {
     }
 }
 
+/**
+ * Accept WhatsApp call.
+ */
+async function acceptCall(callId) {
+    const body = {
+        messaging_product: "whatsapp",
+        call_id: callId,
+        action: "accept",
+    };
+
+    try {
+        const response = await axios.post(WHATSAPP_API_URL, body, {
+            headers: {
+                Authorization: ACCESS_TOKEN,
+                "Content-Type": "application/json",
+            },
+        });
+
+        const success = response.data?.success === true;
+
+        if (success) {
+            console.log(`Call ${callId} successfully accepted.`);
+        } else {
+            console.warn(`Call ${callId} accept response was not successful.`);
+        }
+
+        return response.data;
+    } catch (error) {
+        console.error(`Failed to accept call ${callId}:`, error.message);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Create a simple WAV file from audio chunks
+ */
+function createSimpleWavFile(audioChunks, audioFormat = null) {
+    try {
+        if (!audioChunks || audioChunks.length === 0) {
+            return null;
+        }
+
+        // Combine all audio chunks
+        const combinedAudio = Buffer.concat(audioChunks);
+        const dataSize = combinedAudio.length;
+        
+        // Use detected audio format or default to 44.1kHz mono 16-bit
+        const sampleRate = audioFormat?.sampleRate || 44100;
+        const channels = audioFormat?.channels || 1;
+        const bitsPerSample = 16;
+        const byteRate = sampleRate * channels * (bitsPerSample / 8);
+        const blockAlign = channels * (bitsPerSample / 8);
+        
+        log(LOG_LEVELS.INFO, `🎵 Creating WAV file: ${sampleRate}Hz, ${channels} channel(s), ${bitsPerSample}-bit, ${dataSize} bytes`);
+        
+        // WAV header
+        const header = Buffer.alloc(44);
+        header.write('RIFF', 0);
+        header.writeUInt32LE(36 + dataSize, 4);
+        header.write('WAVE', 8);
+        header.write('fmt ', 12);
+        header.writeUInt32LE(16, 16);
+        header.writeUInt16LE(1, 20); // PCM format
+        header.writeUInt16LE(channels, 22); // Channels
+        header.writeUInt32LE(sampleRate, 24); // Sample rate
+        header.writeUInt32LE(byteRate, 28); // Byte rate
+        header.writeUInt16LE(blockAlign, 32); // Block align
+        header.writeUInt16LE(bitsPerSample, 34); // Bits per sample
+        header.write('data', 36);
+        header.writeUInt32LE(dataSize, 40);
+        
+        return Buffer.concat([header, combinedAudio]);
+    } catch (error) {
+        log(LOG_LEVELS.ERROR, 'Error creating simple WAV file:', error);
+        return null;
+    }
+}
+
+// Graceful shutdown handling
+function gracefulShutdown(signal) {
+    log(LOG_LEVELS.INFO, `${signal} received, shutting down gracefully`);
+    
+    // Close server with timeout
+    const timeout = setTimeout(() => {
+        log(LOG_LEVELS.WARN, 'Force closing server after timeout');
+        process.exit(1);
+    }, 5000); // 5 second timeout
+    
+    // Close Socket.IO server first
+    if (io) {
+        io.close(() => {
+            log(LOG_LEVELS.INFO, 'Socket.IO server closed');
+        });
+    }
+    
+    server.close(() => {
+        clearTimeout(timeout);
+        log(LOG_LEVELS.INFO, 'Server closed');
+        process.exit(0);
+    });
+    
+    // Force close all connections
+    server.getConnections((err, count) => {
+        if (err) {
+            log(LOG_LEVELS.ERROR, 'Error getting connections:', err);
+            return;
+        }
+        log(LOG_LEVELS.INFO, `Closing ${count} active connections`);
+    });
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+// Unhandled error handling
+process.on('uncaughtException', (error) => {
+    log(LOG_LEVELS.ERROR, 'Uncaught exception', { error: error.message, stack: error.stack });
+    process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    log(LOG_LEVELS.ERROR, 'Unhandled rejection', { reason: reason?.message || reason, promise });
+});
+
 // Start the server
-const PORT = process.env.PORT || 19000;
-server.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server is running at http://0.0.0.0:${PORT}`);
+server.listen(CONFIG.PORT, "0.0.0.0", () => {
+    log(LOG_LEVELS.INFO, "Server started successfully", {
+        port: CONFIG.PORT,
+        logLevel: CONFIG.LOG_LEVEL,
+        maxRecordingDuration: CONFIG.MAX_RECORDING_DURATION,
+        maxAudioChunks: CONFIG.MAX_AUDIO_CHUNKS,
+        cleanupInterval: CONFIG.CLEANUP_INTERVAL,
+        audioRecordingsPath: path.join(__dirname, 'call-recordings'),
+        environment: process.env.NODE_ENV || 'development'
+    });
 });
