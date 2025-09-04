@@ -986,6 +986,40 @@ io.on("connection", (socket) => {
         }
     });
 
+    // 🆕 Real-time WhatsApp remote audio from browser (PCM base64)
+    socket.on("whatsapp-audio-chunk", (data) => {
+        try {
+            log(LOG_LEVELS.INFO, `📥 Received WhatsApp audio chunk: ${data.size} bytes`, {
+                correlationId: socket.correlationId,
+                callId: data.callId
+            });
+            
+            if (audioRecorder && audioRecorder.isRecording) {
+                const audioBuffer = Buffer.from(data.audioData, 'base64');
+                // Store as WhatsApp audio (right channel)
+                audioRecorder.whatsappAudioChunks.push(audioBuffer);
+                audioRecorder.hasWhatsAppAudio = true;
+                
+                log(LOG_LEVELS.DEBUG, `✅ WhatsApp audio chunk processed successfully`, {
+                    correlationId: socket.correlationId,
+                    callId: data.callId,
+                    totalWhatsAppChunks: audioRecorder.whatsappAudioChunks.length
+                });
+            } else {
+                log(LOG_LEVELS.WARN, `❌ Audio recorder not available or not recording for WhatsApp audio`, {
+                    correlationId: socket.correlationId,
+                    callId: data.callId
+                });
+            }
+        } catch (error) {
+            log(LOG_LEVELS.ERROR, "Error processing WhatsApp audio chunk", {
+                correlationId: socket.correlationId,
+                callId: data.callId,
+                error: error.message
+            });
+        }
+    });
+
     // Final audio recording from browser
     socket.on("final-audio-recording", (data) => {
         try {
@@ -1008,11 +1042,15 @@ io.on("connection", (socket) => {
                 let wavFile = null;
                 
                 // 🆕 CRITICAL: Use real-time chunks instead of final recording to avoid "mic on" sound
-                if (audioRecorder.browserAudioChunks.length > 0) {
-                    log(LOG_LEVELS.INFO, `🎵 Using ${audioRecorder.browserAudioChunks.length} real-time audio chunks instead of final recording`);
+                if (audioRecorder.browserAudioChunks.length > 0 || audioRecorder.whatsappAudioChunks.length > 0) {
+                    log(LOG_LEVELS.INFO, `🎵 Using real-time audio chunks: ${audioRecorder.browserAudioChunks.length} browser + ${audioRecorder.whatsappAudioChunks.length} WhatsApp chunks`);
                     
-                    // Create WAV file from real-time chunks (these contain actual conversation)
-                    wavFile = createSimpleWavFile(audioRecorder.browserAudioChunks, audioRecorder.audioFormat);
+                    // Combine browser and WhatsApp audio chunks for complete conversation recording
+                    const allAudioChunks = [...audioRecorder.browserAudioChunks, ...audioRecorder.whatsappAudioChunks];
+                    log(LOG_LEVELS.INFO, `🎵 Total combined audio chunks: ${allAudioChunks.length} (${audioRecorder.browserAudioChunks.length} browser + ${audioRecorder.whatsappAudioChunks.length} WhatsApp)`);
+                    
+                    // Create WAV file from combined real-time chunks (these contain actual conversation)
+                    wavFile = createSimpleWavFile(allAudioChunks, audioRecorder.audioFormat);
                 } else {
                     // Fallback: use final recording if no real-time chunks available
                     log(LOG_LEVELS.INFO, `🎵 No real-time chunks available, using final recording: ${data.audioData?.length || 0} base64 chars`);
@@ -1055,10 +1093,14 @@ io.on("connection", (socket) => {
                                 fileSize: wavFile.length,
                                 duration: `${data.duration}s`,
                                 totalSize: data.totalSize,
-                            browserChunks: audioRecorder.browserAudioChunks.length
+                                browserChunks: audioRecorder.browserAudioChunks.length,
+                                whatsappChunks: audioRecorder.whatsappAudioChunks.length,
+                                totalChunks: audioRecorder.browserAudioChunks.length + audioRecorder.whatsappAudioChunks.length,
+                                hasBrowserAudio: audioRecorder.hasBrowserAudio,
+                                hasWhatsAppAudio: audioRecorder.hasWhatsAppAudio
                             });
                             console.log(`✅ Recording saved successfully: ${filename}`);
-                        console.log(`📊 Audio sources - Browser: ${audioRecorder.browserAudioChunks.length} chunks`);
+                            console.log(`📊 Audio sources - Browser: ${audioRecorder.browserAudioChunks.length} chunks, WhatsApp: ${audioRecorder.whatsappAudioChunks.length} chunks`);
                             
                             // Clean up to prevent memory leaks
                             setTimeout(() => {
