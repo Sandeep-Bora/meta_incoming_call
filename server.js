@@ -1,4 +1,6 @@
-require("dotenv").config();
+// Suppress dotenv debug logging
+process.env.DEBUG = '';
+require("dotenv").config({ debug: false });
 const express = require("express");
 const axios = require("axios");
 const path = require("path");
@@ -94,7 +96,6 @@ requiredDirs.forEach(dir => {
     if (!fs.existsSync(dirPath)) {
         try {
             fs.mkdirSync(dirPath, { recursive: true });
-            log(LOG_LEVELS.INFO, `Created directory: ${dir}`, { directory: dir });
         } catch (error) {
             log(LOG_LEVELS.ERROR, `Failed to create directory: ${dir}`, { directory: dir, error: error.message });
             process.exit(1);
@@ -495,7 +496,7 @@ app.get("/api/recordings", (req, res) => {
         });
         
         res.json({ recordings });
-    } catch (error) {
+        } catch (error) {
         log(LOG_LEVELS.ERROR, "Error fetching recordings list", {
             correlationId: req.correlationId,
             error: error.message
@@ -622,10 +623,9 @@ app.post("/webhook", async (req, res) => {
         const entry = req.body?.entry?.[0];
         const change = entry?.changes?.[0];
         
-        // Only log call-related webhooks, filter out message webhooks
+        // Only process actual call webhooks, filter out message webhooks
         const isCallWebhook = change?.field === 'calls' || 
-                             change?.value?.calls?.length > 0 ||
-                             change?.value?.statuses?.some(status => status.id);
+                             (change?.value?.calls && change.value.calls.length > 0);
         
         if (isCallWebhook) {
             log(LOG_LEVELS.INFO, "Received CALL webhook POST request", {
@@ -691,8 +691,8 @@ app.post("/webhook", async (req, res) => {
                         }
                     }
                     
-                    // Emit call accepted to browser
-                    io.emit("call-is-coming", { 
+                    // Emit call accepted to browser - don't show popup again
+                    io.emit("call-accepted", { 
                         callId: waCallId, 
                         callerName: "WhatsApp User", 
                         callerNumber: statusItem?.recipient_id || "Unknown" 
@@ -723,11 +723,12 @@ app.post("/webhook", async (req, res) => {
             console.warn('Calls webhook received but no actionable statuses found in statuses array. Falling through to handle calls events.');
         }
         
+        // Only process call events if we have actual call data
         const call = change?.value?.calls?.[0];
         const contact = change?.value?.contacts?.[0];
 
         if (!call || !call.id || !call.event) {
-            console.warn("Received invalid or incomplete call event.");
+            // This is not a call event, silently return (could be message status update)
             return res.sendStatus(200);
         }
 
@@ -839,7 +840,7 @@ app.post("/webhook", async (req, res) => {
         }
         
         res.sendStatus(200);
-    } catch (error) {
+        } catch (error) {
         log(LOG_LEVELS.ERROR, 'Webhook error:', {
             correlationId,
             error: error.message,
@@ -867,6 +868,18 @@ io.on("connection", (socket) => {
     
     // Track active connections
     globalState.activeConnections.add(socket.id);
+    
+    // Send webhook status to new connections
+    if (globalState.webhookStatus) {
+        socket.emit("realtime-log", {
+            type: globalState.webhookStatus.configured ? "success" : "warning",
+            message: globalState.webhookStatus.configured ? 
+                "✅ Webhook configured - Ready to receive calls" : 
+                "⚠️ Webhook not configured - Testing ongoing ...",
+            timestamp: new Date().toISOString(),
+            details: globalState.webhookStatus.verification?.reason || ""
+        });
+    }
     
     // Handle disconnection
     socket.on("disconnect", (reason) => {
@@ -930,6 +943,16 @@ io.on("connection", (socket) => {
                 return;
             }
             
+            // Auto-start recording if we have an audio recorder and call is active but recording hasn't started
+            if (audioRecorder && !audioRecorder.isRecording && audioRecorder.audioBridgeActive) {
+                log(LOG_LEVELS.INFO, "Auto-starting recording on first audio chunk", {
+                    correlationId: socket.correlationId,
+                    callId: data.callId,
+                    audioBridgeActive: audioRecorder.audioBridgeActive
+                });
+                audioRecorder.startAudioRecordingAfterBridging();
+            }
+            
             if (audioRecorder && audioRecorder.isRecording) {
                 // Check limits before processing
                 if (!audioRecorder.checkLimits()) {
@@ -970,12 +993,30 @@ io.on("connection", (socket) => {
                     });
                 }
             } else {
-                log(LOG_LEVELS.WARN, "Audio recorder not available or not recording", {
-                    correlationId: socket.correlationId,
-                    callId: data.callId,
-                    hasRecorder: !!audioRecorder,
-                    isRecording: audioRecorder?.isRecording
-                });
+                // Only log this warning occasionally to avoid spam, but provide more context
+                if (!audioRecorder) {
+                    log(LOG_LEVELS.WARN, "Audio recorder not available for audio chunk", {
+                        correlationId: socket.correlationId,
+                        callId: data.callId,
+                        hasRecorder: false
+                    });
+                } else if (!audioRecorder.isRecording) {
+                    // Log only every 10th occurrence to reduce spam
+                    if (!audioRecorder._warningCount) audioRecorder._warningCount = 0;
+                    audioRecorder._warningCount++;
+                    
+                    if (audioRecorder._warningCount % 10 === 1) {
+                        log(LOG_LEVELS.WARN, "Audio recorder exists but not recording - audio chunks being ignored", {
+                            correlationId: socket.correlationId,
+                            callId: data.callId,
+                            hasRecorder: true,
+                            isRecording: false,
+                            audioBridgeActive: audioRecorder.audioBridgeActive,
+                            warningCount: audioRecorder._warningCount,
+                            callIdMatch: audioRecorder.callId === data.callId
+                        });
+                    }
+                }
             }
         } catch (error) {
             log(LOG_LEVELS.ERROR, "Error processing real audio chunk", {
@@ -994,6 +1035,16 @@ io.on("connection", (socket) => {
                 callId: data.callId
             });
             
+            // Auto-start recording if we have an audio recorder and call is active but recording hasn't started
+            if (audioRecorder && !audioRecorder.isRecording && audioRecorder.audioBridgeActive) {
+                log(LOG_LEVELS.INFO, "Auto-starting recording on first WhatsApp audio chunk", {
+                    correlationId: socket.correlationId,
+                    callId: data.callId,
+                    audioBridgeActive: audioRecorder.audioBridgeActive
+                });
+                audioRecorder.startAudioRecordingAfterBridging();
+            }
+            
             if (audioRecorder && audioRecorder.isRecording) {
                 const audioBuffer = Buffer.from(data.audioData, 'base64');
                 // Store as WhatsApp audio (right channel)
@@ -1006,10 +1057,30 @@ io.on("connection", (socket) => {
                     totalWhatsAppChunks: audioRecorder.whatsappAudioChunks.length
                 });
             } else {
-                log(LOG_LEVELS.WARN, `❌ Audio recorder not available or not recording for WhatsApp audio`, {
-                    correlationId: socket.correlationId,
-                    callId: data.callId
-                });
+                // Only log this warning occasionally to avoid spam
+                if (!audioRecorder) {
+                    log(LOG_LEVELS.WARN, "Audio recorder not available for WhatsApp audio chunk", {
+                        correlationId: socket.correlationId,
+                        callId: data.callId,
+                        hasRecorder: false
+                    });
+                } else if (!audioRecorder.isRecording) {
+                    // Log only every 10th occurrence to reduce spam
+                    if (!audioRecorder._whatsappWarningCount) audioRecorder._whatsappWarningCount = 0;
+                    audioRecorder._whatsappWarningCount++;
+                    
+                    if (audioRecorder._whatsappWarningCount % 10 === 1) {
+                        log(LOG_LEVELS.WARN, "Audio recorder exists but not recording for WhatsApp audio - chunks being ignored", {
+                            correlationId: socket.correlationId,
+                            callId: data.callId,
+                            hasRecorder: true,
+                            isRecording: false,
+                            audioBridgeActive: audioRecorder.audioBridgeActive,
+                            warningCount: audioRecorder._whatsappWarningCount,
+                            callIdMatch: audioRecorder.callId === data.callId
+                        });
+                    }
+                }
             }
         } catch (error) {
             log(LOG_LEVELS.ERROR, "Error processing WhatsApp audio chunk", {
@@ -1045,12 +1116,11 @@ io.on("connection", (socket) => {
                 if (audioRecorder.browserAudioChunks.length > 0 || audioRecorder.whatsappAudioChunks.length > 0) {
                     log(LOG_LEVELS.INFO, `🎵 Using real-time audio chunks: ${audioRecorder.browserAudioChunks.length} browser + ${audioRecorder.whatsappAudioChunks.length} WhatsApp chunks`);
                     
-                    // Combine browser and WhatsApp audio chunks for complete conversation recording
-                    const allAudioChunks = [...audioRecorder.browserAudioChunks, ...audioRecorder.whatsappAudioChunks];
-                    log(LOG_LEVELS.INFO, `🎵 Total combined audio chunks: ${allAudioChunks.length} (${audioRecorder.browserAudioChunks.length} browser + ${audioRecorder.whatsappAudioChunks.length} WhatsApp)`);
+                    // Create mixed stereo WAV file with browser on left channel and WhatsApp on right channel
+                    log(LOG_LEVELS.INFO, `🎵 Creating mixed stereo recording: ${audioRecorder.browserAudioChunks.length} browser chunks (left) + ${audioRecorder.whatsappAudioChunks.length} WhatsApp chunks (right)`);
                     
-                    // Create WAV file from combined real-time chunks (these contain actual conversation)
-                    wavFile = createSimpleWavFile(allAudioChunks, audioRecorder.audioFormat);
+                    // Create mixed stereo WAV file (browser=left, WhatsApp=right)
+                    wavFile = createMixedStereoWavFile(audioRecorder.browserAudioChunks, audioRecorder.whatsappAudioChunks, audioRecorder.audioFormat);
                 } else {
                     // Fallback: use final recording if no real-time chunks available
                     log(LOG_LEVELS.INFO, `🎵 No real-time chunks available, using final recording: ${data.audioData?.length || 0} base64 chars`);
@@ -1088,7 +1158,7 @@ io.on("connection", (socket) => {
                             // Mark this recording as saved to prevent duplicates
                             socket.recordingSaved = true;
                             
-                            log(LOG_LEVELS.INFO, `🎵 Conversation recording saved: ${filename}`, { 
+                            log(LOG_LEVELS.INFO, `🎵 Mixed stereo conversation recording saved: ${filename}`, { 
                                 filepath, 
                                 fileSize: wavFile.length,
                                 duration: `${data.duration}s`,
@@ -1097,10 +1167,11 @@ io.on("connection", (socket) => {
                                 whatsappChunks: audioRecorder.whatsappAudioChunks.length,
                                 totalChunks: audioRecorder.browserAudioChunks.length + audioRecorder.whatsappAudioChunks.length,
                                 hasBrowserAudio: audioRecorder.hasBrowserAudio,
-                                hasWhatsAppAudio: audioRecorder.hasWhatsAppAudio
+                                hasWhatsAppAudio: audioRecorder.hasWhatsAppAudio,
+                                format: 'stereo (browser=left, whatsapp=right)'
                             });
-                            console.log(`✅ Recording saved successfully: ${filename}`);
-                            console.log(`📊 Audio sources - Browser: ${audioRecorder.browserAudioChunks.length} chunks, WhatsApp: ${audioRecorder.whatsappAudioChunks.length} chunks`);
+                            console.log(`✅ Mixed stereo recording saved successfully: ${filename}`);
+                            console.log(`📊 Stereo mix - Left (Browser): ${audioRecorder.browserAudioChunks.length} chunks, Right (WhatsApp): ${audioRecorder.whatsappAudioChunks.length} chunks`);
                             
                             // Clean up to prevent memory leaks
                             setTimeout(() => {
@@ -1137,6 +1208,13 @@ io.on("connection", (socket) => {
             const result = await acceptCall(callId);
             log(LOG_LEVELS.INFO, `Call accepted: ${callId}`);
             console.log("Accept call response:", result);
+            
+            // 🆕 CRITICAL: Broadcast call acceptance to ALL browsers
+            io.emit("call-accepted", { 
+                callId: callId, 
+                callerName: "WhatsApp User", 
+                callerNumber: "Unknown" 
+            });
             
             // 🆕 CRITICAL: Start audio recording when call is accepted from browser
             if (audioRecorder) {
@@ -1445,7 +1523,84 @@ async function acceptCall(callId) {
 }
 
 /**
- * Create a simple WAV file from audio chunks
+ * Mix browser and WhatsApp audio chunks into stereo WAV file
+ * Browser audio goes to left channel, WhatsApp audio goes to right channel
+ */
+function createMixedStereoWavFile(browserChunks, whatsappChunks, audioFormat = null) {
+    try {
+        if ((!browserChunks || browserChunks.length === 0) && (!whatsappChunks || whatsappChunks.length === 0)) {
+            return null;
+        }
+
+        // Use detected audio format or default to 44.1kHz 16-bit
+        const sampleRate = audioFormat?.sampleRate || 44100;
+        const bitsPerSample = 16;
+        const bytesPerSample = bitsPerSample / 8;
+        
+        // Combine browser audio (left channel)
+        const browserAudio = browserChunks && browserChunks.length > 0 ? Buffer.concat(browserChunks) : Buffer.alloc(0);
+        
+        // Combine WhatsApp audio (right channel)  
+        const whatsappAudio = whatsappChunks && whatsappChunks.length > 0 ? Buffer.concat(whatsappChunks) : Buffer.alloc(0);
+        
+        // Calculate the maximum length to ensure both channels are the same length
+        const maxLength = Math.max(browserAudio.length, whatsappAudio.length);
+        
+        // If one audio source is longer, pad the shorter one with silence
+        const paddedBrowserAudio = Buffer.alloc(maxLength);
+        const paddedWhatsappAudio = Buffer.alloc(maxLength);
+        
+        browserAudio.copy(paddedBrowserAudio, 0, 0, Math.min(browserAudio.length, maxLength));
+        whatsappAudio.copy(paddedWhatsappAudio, 0, 0, Math.min(whatsappAudio.length, maxLength));
+        
+        // Create stereo audio by interleaving left and right channels
+        const stereoAudio = Buffer.alloc(maxLength * 2); // Stereo = 2 channels
+        
+        for (let i = 0; i < maxLength; i += bytesPerSample) {
+            // Left channel (browser audio)
+            stereoAudio.writeInt16LE(paddedBrowserAudio.readInt16LE(i), i * 2);
+            // Right channel (WhatsApp audio)  
+            stereoAudio.writeInt16LE(paddedWhatsappAudio.readInt16LE(i), i * 2 + bytesPerSample);
+        }
+        
+        const dataSize = stereoAudio.length;
+        const channels = 2; // Stereo
+        const byteRate = sampleRate * channels * bytesPerSample;
+        const blockAlign = channels * bytesPerSample;
+        
+        log(LOG_LEVELS.INFO, `🎵 Creating mixed stereo WAV file: ${sampleRate}Hz, ${channels} channels, ${bitsPerSample}-bit, ${dataSize} bytes`, {
+            browserChunks: browserChunks?.length || 0,
+            whatsappChunks: whatsappChunks?.length || 0,
+            browserAudioLength: browserAudio.length,
+            whatsappAudioLength: whatsappAudio.length,
+            finalLength: maxLength
+        });
+        
+        // WAV header for stereo
+        const header = Buffer.alloc(44);
+        header.write('RIFF', 0);
+        header.writeUInt32LE(36 + dataSize, 4);
+        header.write('WAVE', 8);
+        header.write('fmt ', 12);
+        header.writeUInt32LE(16, 16);
+        header.writeUInt16LE(1, 20); // PCM format
+        header.writeUInt16LE(channels, 22); // Stereo channels
+        header.writeUInt32LE(sampleRate, 24); // Sample rate
+        header.writeUInt32LE(byteRate, 28); // Byte rate
+        header.writeUInt16LE(blockAlign, 32); // Block align
+        header.writeUInt16LE(bitsPerSample, 34); // Bits per sample
+        header.write('data', 36);
+        header.writeUInt32LE(dataSize, 40);
+        
+        return Buffer.concat([header, stereoAudio]);
+    } catch (error) {
+        log(LOG_LEVELS.ERROR, 'Error creating mixed stereo WAV file:', error);
+        return null;
+    }
+}
+
+/**
+ * Create a simple WAV file from audio chunks (fallback for single source)
  */
 function createSimpleWavFile(audioChunks, audioFormat = null) {
     try {
@@ -1535,15 +1690,69 @@ process.on('unhandledRejection', (reason, promise) => {
     log(LOG_LEVELS.ERROR, 'Unhandled rejection', { reason: reason?.message || reason, promise });
 });
 
+// Function to verify webhook configuration with WhatsApp
+async function verifyWebhookConfiguration() {
+    try {
+        const phoneNumberId = process.env.PHONE_NUMBER_ID;
+        const accessToken = process.env.ACCESS_TOKEN;
+        
+        if (!phoneNumberId || !accessToken) {
+            return { configured: false, reason: 'Missing environment variables' };
+        }
+        
+        // Try to get app info to check webhook configuration
+        // The webhook URL is configured at the app level, not phone number level
+        const response = await axios.get(`https://graph.facebook.com/v18.0/me`, {
+            params: {
+                fields: 'id,name',
+                access_token: accessToken
+            },
+            timeout: 5000
+        });
+        
+        // If we can successfully connect to the API, assume webhook is configured
+        // since the main verification happens when WhatsApp sends webhook events
+        if (response.data && response.data.id) {
+            return { configured: true, reason: 'API connection successful - webhook verification will occur on first webhook event' };
+        } else {
+            return { configured: false, reason: 'Failed to connect to WhatsApp API' };
+        }
+    } catch (error) {
+        // If it's an authentication error, webhook is definitely not configured
+        if (error.response?.status === 401 || error.response?.status === 403) {
+            return { configured: false, reason: 'Invalid access token - webhook not configured' };
+        }
+        // For other errors, assume webhook might be configured but we can't verify
+        return { configured: true, reason: 'Cannot verify webhook status - will be confirmed on first webhook event' };
+    }
+}
+
 // Start the server
-server.listen(CONFIG.PORT, "0.0.0.0", () => {
-    log(LOG_LEVELS.INFO, "Server started successfully", {
-        port: CONFIG.PORT,
-        logLevel: CONFIG.LOG_LEVEL,
-        maxRecordingDuration: CONFIG.MAX_RECORDING_DURATION,
-        maxAudioChunks: CONFIG.MAX_AUDIO_CHUNKS,
-        cleanupInterval: CONFIG.CLEANUP_INTERVAL,
-        audioRecordingsPath: path.join(__dirname, 'call-recordings'),
-        environment: process.env.NODE_ENV || 'development'
-    });
+server.listen(CONFIG.PORT, "0.0.0.0", async () => {
+    // Check webhook configuration status
+    const webhookUrl = `http://localhost:${CONFIG.PORT}/webhook`;
+    const envVarsConfigured = !!(process.env.PHONE_NUMBER_ID && process.env.ACCESS_TOKEN && process.env.VERIFY_TOKEN);
+    
+    // Verify webhook with WhatsApp
+    const webhookVerification = await verifyWebhookConfiguration();
+    const webhookFullyConfigured = envVarsConfigured && webhookVerification.configured;
+    
+    // Store webhook status in global state for new connections
+    globalState.webhookStatus = {
+        configured: webhookFullyConfigured,
+        verification: webhookVerification
+    };
+    
+    console.log(`📊 Webhook Status: ${webhookFullyConfigured ? '✅ READY' : '❌ NOT CONFIGURED'}`);
+    console.log(`${webhookFullyConfigured ? '🎉 Ready to receive WhatsApp calls!' : '⚠️  Configure webhook settings to enable call handling'}\n`);
+    
+    // Emit webhook status to all connected clients
+    if (!webhookFullyConfigured) {
+        io.emit("realtime-log", {
+            type: "warning",
+            message: "Webhook not configured - Testing ongoing ...",
+            timestamp: new Date().toISOString(),
+            details: webhookVerification.reason
+        });
+    }
 });

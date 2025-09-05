@@ -72,6 +72,31 @@
       box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
     }
 
+    .speaker-toggle {
+      background: rgba(255,255,255,0.2);
+      border: 1px solid rgba(255,255,255,0.3);
+      color: white;
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 14px;
+      cursor: pointer;
+      transition: all 0.3s ease;
+      margin-left: 10px;
+    }
+
+    .speaker-toggle:hover {
+      background: rgba(255,255,255,0.3);
+    }
+
+    .speaker-toggle.muted {
+      background: rgba(255,0,0,0.3);
+      border-color: rgba(255,0,0,0.5);
+    }
+
+    .speaker-toggle.muted:hover {
+      background: rgba(255,0,0,0.4);
+    }
+
     .nav-link i {
       margin-right: 6px;
     }
@@ -308,6 +333,11 @@
     .call-btn.mute {
       background: #6c757d;
       color: white;
+    }
+
+    .call-btn.skip {
+      background: #ffc107;
+      color: #212529;
     }
 
     .call-btn:hover {
@@ -563,6 +593,9 @@
         <a href="recordings.html" class="nav-link">
           <i class="fas fa-microphone"></i> Go to Recordings
         </a>
+        <button class="speaker-toggle" id="speaker-toggle" onclick="toggleRinging()" title="Toggle Ringing Tone">
+          <i class="fas fa-volume-up"></i>
+        </button>
       </div>
       <div class="status-bar" id="connection-status">
         <span class="pulse-dot"></span> Connecting to server...
@@ -682,6 +715,9 @@
         </button>
         <button class="call-btn reject" onclick="rejectCall()">
           <i class="fas fa-phone-slash"></i>
+        </button>
+        <button class="call-btn skip" onclick="skipCall()" title="Skip this call">
+          <i class="fas fa-forward"></i>
         </button>
       </div>
     </div>
@@ -1087,11 +1123,15 @@
       
       callOverlay.style.display = 'block';
       
-      // Play ringtone
-      ringtone.currentTime = 0;
-      ringtone.play().catch(e => {
-        addLog('Could not play ringtone: ' + e.message, 'warning');
-      });
+      // Play ringtone only if ringing is enabled
+      if (isRingingEnabled) {
+        ringtone.currentTime = 0;
+        ringtone.play().catch(e => {
+          addLog('Could not play ringtone: ' + e.message, 'warning');
+        });
+      } else {
+        addLog('🔇 Ringing disabled - call popup shown without sound', 'info');
+      }
       
       addLog(`📞 Incoming call from ${callerName} (${callerNumber})`, 'info');
       showNotification(`Incoming call from ${callerName}`, 'info');
@@ -1164,6 +1204,11 @@
 
     socket.on('call-is-coming', ({ callId, callerName, callerNumber }) => {
       showIncomingCall(callerName, callerNumber, callId);
+    });
+
+    socket.on('call-accepted', ({ callId, callerName, callerNumber }) => {
+      addLog('📞 Call accepted by someone else - hiding popup', 'info');
+      hideIncomingCall();
     });
 
     socket.on('start-browser-timer', () => {
@@ -1283,6 +1328,12 @@
       console.log('🔒 Forced audio capture to stop');
     });
 
+    // Listen for real-time log messages from server
+    socket.on('realtime-log', (logData) => {
+      addLog(logData.message, logData.type);
+      console.log('📝 Real-time log from server:', logData);
+    });
+
     // Call control functions
     async function makeCall() {
       const phoneNumber = document.getElementById('phone-number').value.trim();
@@ -1346,6 +1397,40 @@
         const muteIcon = incomingMuteBtn.querySelector('i');
         muteIcon.className = ringtone.muted ? 'fas fa-volume-mute' : 'fas fa-microphone';
         addLog(ringtone.muted ? '🔇 Ringtone muted' : '🔊 Ringtone unmuted', 'info');
+      }
+    }
+
+    // Global variable to track ringing state
+    let isRingingEnabled = true;
+
+    function toggleRinging() {
+      isRingingEnabled = !isRingingEnabled;
+      const speakerToggle = document.getElementById('speaker-toggle');
+      const icon = speakerToggle.querySelector('i');
+      
+      if (isRingingEnabled) {
+        icon.className = 'fas fa-volume-up';
+        speakerToggle.classList.remove('muted');
+        addLog('🔊 Ringing enabled', 'info');
+      } else {
+        icon.className = 'fas fa-volume-mute';
+        speakerToggle.classList.add('muted');
+        addLog('🔇 Ringing disabled', 'info');
+        // Stop current ringing if any
+        if (ringtone && !ringtone.paused) {
+          ringtone.pause();
+          ringtone.currentTime = 0;
+        }
+      }
+    }
+
+    function skipCall() {
+      addLog('⏭️ Call skipped - stopping ringing for this browser', 'info');
+      hideIncomingCall();
+      // Stop ringing for this browser only
+      if (ringtone && !ringtone.paused) {
+        ringtone.pause();
+        ringtone.currentTime = 0;
       }
     }
 
