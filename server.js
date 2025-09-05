@@ -944,9 +944,52 @@ io.on("connection", (socket) => {
         }
 
         try {
-            await browserPc.addIceCandidate(new RTCIceCandidate(candidate));
+            // Handle different candidate formats
+            let candidateObj;
+            
+            if (typeof candidate === 'string') {
+                // If it's a string, it might be the full candidate line
+                if (candidate.startsWith('candidate:')) {
+                    // Remove the 'candidate:' prefix if present
+                    candidate = candidate.substring(10);
+                }
+                // Parse the candidate string into an object
+                const parts = candidate.split(' ');
+                if (parts.length >= 6) {
+                    candidateObj = {
+                        candidate: candidate,
+                        sdpMid: parts[0] || null,
+                        sdpMLineIndex: parseInt(parts[1]) || null
+                    };
+                } else {
+                    console.warn("Invalid ICE candidate format:", candidate);
+                    return;
+                }
+            } else if (typeof candidate === 'object' && candidate.candidate) {
+                // If it's already an object with candidate property
+                candidateObj = candidate;
+            } else {
+                console.warn("Unknown ICE candidate format:", candidate);
+                return;
+            }
+
+            // Validate candidate object before adding
+            if (!candidateObj.candidate || candidateObj.candidate.trim() === '') {
+                console.warn("Empty or invalid candidate string:", candidateObj);
+                return;
+            }
+
+            console.log("Adding ICE candidate from browser:", {
+                candidate: candidateObj.candidate.substring(0, 50) + '...',
+                sdpMid: candidateObj.sdpMid,
+                sdpMLineIndex: candidateObj.sdpMLineIndex
+            });
+            
+            await browserPc.addIceCandidate(new RTCIceCandidate(candidateObj));
         } catch (err) {
             console.error("Failed to add ICE candidate from browser:", err);
+            console.error("Candidate data:", candidate);
+            console.error("Error details:", err.message);
         }
     });
 
@@ -1310,7 +1353,13 @@ async function initiateWebRTCBridge() {
 
     browserPc.onicecandidate = (event) => {
         if (event.candidate) {
-            browserSocket.emit("browser-candidate", event.candidate);
+            // Convert RTCIceCandidate to plain object for transmission
+            const candidateData = {
+                candidate: event.candidate.candidate,
+                sdpMid: event.candidate.sdpMid,
+                sdpMLineIndex: event.candidate.sdpMLineIndex
+            };
+            browserSocket.emit("browser-candidate", candidateData);
         }
     };
 
