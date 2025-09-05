@@ -112,6 +112,10 @@ if (missingEnvVars.length > 0) {
 }
 
 const app = express();
+
+// Trust proxy to get real IP addresses (for deployment behind proxies/load balancers)
+app.set('trust proxy', true);
+
 const server = http.createServer(app);
 const io = socketIO(server, {
     cors: {
@@ -138,6 +142,19 @@ const io = socketIO(server, {
 // }));
 // app.use(compression());
 
+// Function to get real client IP (handles proxies, load balancers, etc.)
+function getClientIP(req) {
+    return req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
+           req.headers['x-real-ip'] ||
+           req.headers['x-client-ip'] ||
+           req.headers['cf-connecting-ip'] || // Cloudflare
+           req.headers['x-cluster-client-ip'] ||
+           req.connection?.remoteAddress ||
+           req.socket?.remoteAddress ||
+           req.ip ||
+           'unknown';
+}
+
 // Request logging middleware
 app.use((req, res, next) => {
     const correlationId = generateCorrelationId();
@@ -154,7 +171,7 @@ app.use((req, res, next) => {
             statusCode: res.statusCode,
             duration: `${duration}ms`,
             userAgent: req.get('User-Agent'),
-            ip: req.ip
+            ip: getClientIP(req)
         });
     });
     
@@ -623,6 +640,20 @@ app.post("/webhook", async (req, res) => {
         const entry = req.body?.entry?.[0];
         const change = entry?.changes?.[0];
         
+        // Update webhook status to configured since we're receiving webhook events
+        if (!globalState.webhookStatus.configured) {
+            globalState.webhookStatus.configured = true;
+            globalState.webhookStatus.verification.reason = 'Webhook events received - webhook is configured';
+            
+            // Notify all connected clients that webhook is now configured
+            io.emit("realtime-log", {
+                type: "success",
+                message: "✅ Webhook configured - Ready to receive calls",
+                timestamp: new Date().toISOString(),
+                details: "Webhook events are being received successfully"
+            });
+        }
+        
         // Only process actual call webhooks, filter out message webhooks
         const isCallWebhook = change?.field === 'calls' || 
                              (change?.value?.calls && change.value.calls.length > 0);
@@ -862,7 +893,7 @@ io.on("connection", (socket) => {
     log(LOG_LEVELS.INFO, "Socket.IO connection established", {
         correlationId,
         socketId: socket.id,
-        clientIP: socket.handshake.address,
+        clientIP: getClientIP(socket.handshake),
         userAgent: socket.handshake.headers['user-agent']
     });
     
@@ -1710,10 +1741,13 @@ async function verifyWebhookConfiguration() {
             timeout: 5000
         });
         
-        // If we can successfully connect to the API, assume webhook is configured
-        // since the main verification happens when WhatsApp sends webhook events
+        // If we can successfully connect to the API, we still can't verify webhook URL
+        // The webhook URL is configured at the app level and we can't query it directly
         if (response.data && response.data.id) {
-            return { configured: true, reason: 'API connection successful - webhook verification will occur on first webhook event' };
+            return { 
+                configured: false, 
+                reason: 'API connected but webhook URL verification not possible - configure webhook to receive calls' 
+            };
         } else {
             return { configured: false, reason: 'Failed to connect to WhatsApp API' };
         }
@@ -1722,8 +1756,8 @@ async function verifyWebhookConfiguration() {
         if (error.response?.status === 401 || error.response?.status === 403) {
             return { configured: false, reason: 'Invalid access token - webhook not configured' };
         }
-        // For other errors, assume webhook might be configured but we can't verify
-        return { configured: true, reason: 'Cannot verify webhook status - will be confirmed on first webhook event' };
+        // For other errors, assume webhook is not configured
+        return { configured: false, reason: `API connection failed: ${error.message}` };
     }
 }
 
